@@ -1,0 +1,33 @@
+apiVersion: sisyphus/v1
+kind: Deployment
+metadata:
+  name: echo
+config:
+  env: prod
+  image: purple.local:5001/sisyphus/example/echo_config:latest
+  variables:
+    google-credentials:
+      secretKeyRef:
+        name: google
+        key: google-application-credentials.json
+    secret-token:
+      secretKeyRef:
+        name: tokens
+        key: secret-token
+footprint:
+  gke_escalante-418502_us-central1_ep-us-central1:
+    replicas: 1
+  gke_escalante-418502_us-west4_ep-us-west4:
+    replicas: 1
+
+---
+
+apiVersion: sisyphus/v1
+kind: KubernetesYaml
+metadata:
+  name: some-yaml
+sources:
+  - secrets.yaml
+clusters:
+  - gke_escalante-418502_us-central1_ep-us-central1
+  - gke_escalante-418502_us-west4_ep-us-west4

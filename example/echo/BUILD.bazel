@@ -1,0 +1,37 @@
+package(default_visibility = ["//visibility:private"])
+
+load("@aspect_bazel_lib//lib:transitions.bzl", "platform_transition_filegroup")
+load("@aspect_rules_js//js:defs.bzl", "js_binary", "js_image_layer")
+load("@dev_april_sisyphus//:defs.bzl", "sisyphus_pushable")
+load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_load", "oci_push")
+
+sisyphus_pushable(
+    name = "sisyphus",
+    binary_image = ":image",
+    binary_repository = "localhost:5001/sisyphus/example/echo",
+    config_entrypoint = "frontend.star",
+    remote_tags = ["latest"],
+)
+
+oci_image(
+    name = "image",
+    base = "@debian",
+    entrypoint = ["/app/echo/echo"],
+    tars = [
+        ":echo_layers",
+    ],
+    workdir = "/app/echo/echo.runfiles/_main",
+)
+
+js_image_layer(
+    name = "echo_layers",
+    binary = ":echo",
+    root = "/app",
+)
+
+js_binary(
+    name = "echo",
+    entry_point = "frontend.js",
+    data = ["//:package_json"],
+)
+

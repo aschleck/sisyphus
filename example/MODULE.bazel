@@ -1,0 +1,26 @@
+module(name = "example")
+
+bazel_dep(name = "aspect_bazel_lib", version = "2.21.2")
+bazel_dep(name = "aspect_rules_js", version = "2.6.0")
+bazel_dep(name = "dev_april_sisyphus")
+local_path_override(module_name = "dev_april_sisyphus", path = "../")
+bazel_dep(name = "rules_oci", version = "2.2.6")
+
+oci = use_extension("@rules_oci//oci:extensions.bzl", "oci")
+
+oci.pull(
+    name = "debian",
+    digest = "sha256:f6b0baf2b37e7cdcbdb2b641aab871e06cf35ac306cf8af5b56fb8da473ab4ce",
+    image = "index.docker.io/library/debian:unstable",
+    platforms = [
+        "linux/amd64",
+        "linux/arm64/v8",
+    ],
+)
+
+use_repo(
+    oci,
+    "debian",
+    "debian_linux_amd64",
+    "debian_linux_arm64_v8",
+)
