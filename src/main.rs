@@ -923,34 +923,3 @@ fn namespace_or_default(namespace: Option<String>) -> String {
     namespace.unwrap_or_else(|| "".to_string())
 }
 
-//mod sql_types;
-//use crate::sql_types::DecodableOffsetDateTime;
-//use time::OffsetDateTime;
-//macro_rules! impl_any_decode {
-//    ($ty:ty) => {
-//        impl<'r> sqlx::Decode<'r, sqlx::any::Any> for $ty
-//        where
-//            $ty: sqlx::AnyDecode<'r>,
-//        {
-//            fn decode(
-//                value: sqlx::any::AnyValueRef<'r>,
-//            ) -> Result<Self, sqlx::error::BoxDynError> {
-//                match value.kind {
-//                    sqlx::any::value::AnyValueRefKind::MySql(value) => {
-//                        <$ty as sqlx::Decode<'r, sqlx::mysql::MySql>>::decode(value)
-//                    }
-//
-//                    sqlx::any::value::AnyValueRefKind::Sqlite(value) => {
-//                        <$ty as sqlx::Decode<'r, sqlx::sqlite::Sqlite>>::decode(value)
-//                    }
-//
-//                    sqlx::any::value::AnyValueRefKind::Postgres(value) => {
-//                        <$ty as sqlx::Decode<'r, sqlx::postgres::Postgres>>::decode(value)
-//                    }
-//                }
-//            }
-//        }
-//    };
-//}
-//
-//impl_any_decode!(time::OffsetDateTime);
