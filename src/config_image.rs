@@ -1,5 +1,5 @@
 use allocative::Allocative;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
@@ -8,8 +8,8 @@ use starlark::{
     starlark_module,
     syntax::{AstModule, Dialect},
     values::{
-        NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike, dict::UnpackDictEntries,
-        float::StarlarkFloat, list_or_tuple::UnpackListOrTuple, starlark_value,
+        dict::UnpackDictEntries, float::StarlarkFloat, list_or_tuple::UnpackListOrTuple,
+        starlark_value, NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike,
     },
 };
 use std::{collections::BTreeMap, convert::TryInto, fmt, path::Path};

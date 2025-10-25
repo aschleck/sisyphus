@@ -6,27 +6,31 @@ mod sisyphus_yaml;
 use crate::{
     config_image::{get_config, Argument, ArgumentValues},
     kubernetes::{
-        get_kubernetes_api, get_kubernetes_clients, munge_ignored_fields, KubernetesKey, KubernetesResources, MungeOptions, MANAGER
+        get_kubernetes_api, get_kubernetes_clients, munge_ignored_fields, KubernetesKey,
+        KubernetesResources, MungeOptions, MANAGER,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{Deployment as SisyphusDeployment, HasKind, SisyphusResource, VariableSource},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use console::{Style, style};
+use console::{style, Style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
 };
 use futures::future::try_join_all;
-use k8s_openapi::{api::{
+use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec},
     core::v1::{
-        Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, Namespace, PodSpec, SecretKeySelector, SecretVolumeSource, Volume, VolumeMount
+        Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, Namespace, PodSpec,
+        SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
     },
-}};
+};
 use kube::{
-    api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams}, core::ErrorResponse, Error, ResourceExt
+    api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
+    core::ErrorResponse,
+    Error, ResourceExt,
 };
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
@@ -88,8 +92,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         namespaces: BTreeMap::new(),
     };
     {
-        let resources =
-            get_sisyphus_resources_from_files(Path::new(&monitor_directory))?;
+        let resources = get_sisyphus_resources_from_files(Path::new(&monitor_directory))?;
         render_sisyphus_resources(
             &resources.global_by_key,
             label_namespace,
@@ -110,27 +113,40 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
 
         for key in from_files.by_key.keys() {
-            let Some(namespace) = key.namespace.clone() else { continue };
-            from_files.namespaces.entry(KubernetesKey {
-                name: namespace.clone(),
-                kind: "Namespace".to_string(),
-                api_version: "v1".to_string(),
-                namespace: None,
-                cluster: key.cluster.clone(),
-            }).or_insert_with(|| {
-                let mut metadata = ObjectMeta::default();
-                metadata.name = Some(namespace);
-                let as_namespace = Namespace { metadata, spec: None, status: None };
-                serde_yaml::from_str(&serde_yaml::to_string(&as_namespace).unwrap()).unwrap()
-            });
+            let Some(namespace) = key.namespace.clone() else {
+                continue;
+            };
+            from_files
+                .namespaces
+                .entry(KubernetesKey {
+                    name: namespace.clone(),
+                    kind: "Namespace".to_string(),
+                    api_version: "v1".to_string(),
+                    namespace: None,
+                    cluster: key.cluster.clone(),
+                })
+                .or_insert_with(|| {
+                    let mut metadata = ObjectMeta::default();
+                    metadata.name = Some(namespace);
+                    let as_namespace = Namespace {
+                        metadata,
+                        spec: None,
+                        status: None,
+                    };
+                    serde_yaml::from_str(&serde_yaml::to_string(&as_namespace).unwrap()).unwrap()
+                });
         }
     }
 
     let mut from_database = get_objects_from_database(&pool).await?;
-    munge_ignored_fields(&mut from_database, &mut from_files, MungeOptions {
-        munge_managed_fields: true,
-        munge_secret_data: true,
-    })?;
+    munge_ignored_fields(
+        &mut from_database,
+        &mut from_files,
+        MungeOptions {
+            munge_managed_fields: true,
+            munge_secret_data: true,
+        },
+    )?;
     let changed = generate_diff(&from_database, &from_files)?;
     if !changed {
         println!("Nothing to do");
@@ -144,10 +160,10 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
     match response.trim().to_lowercase().as_str() {
         "y" => {
             apply_diff(&from_database, &from_files, &pool).await?;
-        },
+        }
         _ => {
             println!("Canceled");
-        },
+        }
     }
 
     Ok(())
@@ -156,10 +172,14 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
 async fn refresh(pool: &AnyPool) -> Result<()> {
     let mut from_database = get_objects_from_database(&pool).await?;
     let mut from_kubernetes = get_objects_from_kubernetes(&from_database).await?;
-    munge_ignored_fields(&mut from_database, &mut from_kubernetes, MungeOptions {
-        munge_managed_fields: false,
-        munge_secret_data: true,
-    })?;
+    munge_ignored_fields(
+        &mut from_database,
+        &mut from_kubernetes,
+        MungeOptions {
+            munge_managed_fields: false,
+            munge_secret_data: true,
+        },
+    )?;
     let changed = generate_diff(&from_database, &from_kubernetes)?;
     if !changed {
         println!("Nothing to do");
@@ -173,10 +193,10 @@ async fn refresh(pool: &AnyPool) -> Result<()> {
     match response.trim().to_lowercase().as_str() {
         "y" => {
             apply_refresh(&from_database, &from_kubernetes, &pool).await?;
-        },
+        }
         _ => {
             println!("Canceled");
-        },
+        }
     }
 
     Ok(())
@@ -188,7 +208,12 @@ async fn apply_refresh(
     pool: &AnyPool,
 ) -> Result<()> {
     refresh_group(&from_database.by_key, &from_kubernetes.by_key, &pool).await?;
-    refresh_group(&from_database.namespaces, &from_kubernetes.namespaces, &pool).await?;
+    refresh_group(
+        &from_database.namespaces,
+        &from_kubernetes.namespaces,
+        &pool,
+    )
+    .await?;
     Ok(())
 }
 
@@ -224,7 +249,7 @@ async fn refresh_group(
                 .execute(pool)
                 .await?;
                 println!("Updated {}", key);
-            },
+            }
             None => {
                 sqlx::query(
                     r#"
@@ -245,7 +270,7 @@ async fn refresh_group(
                 .execute(pool)
                 .await?;
                 println!("Deleted {}", key);
-            },
+            }
         };
     }
     Ok(())
@@ -374,7 +399,7 @@ async fn apply_single_diff(
             .execute(pool)
             .await?;
             println!("Updated {}", key);
-        },
+        }
         (Some(h), None) => {
             api.delete(&h.name_any(), &DeleteParams::default())
                 .await
@@ -398,7 +423,7 @@ async fn apply_single_diff(
             .execute(pool)
             .await?;
             println!("Deleted {}", key);
-        },
+        }
         (None, Some(w)) => {
             let result = api
                 .patch(
@@ -423,7 +448,7 @@ async fn apply_single_diff(
             .execute(pool)
             .await?;
             println!("Created {}", key);
-        },
+        }
         (None, None) => bail!("Expected some type of object"),
     }
     Ok(())
@@ -431,12 +456,11 @@ async fn apply_single_diff(
 
 async fn get_objects_from_database(pool: &AnyPool) -> Result<KubernetesResources> {
     let mut tx = pool.begin().await?;
-    let recs =
-        sqlx::query(
-            r#"SELECT api_version, cluster, kind, namespace, name, yaml FROM kubernetes_objects"#
-        )
-            .fetch_all(&mut *tx)
-            .await?;
+    let recs = sqlx::query(
+        r#"SELECT api_version, cluster, kind, namespace, name, yaml FROM kubernetes_objects"#,
+    )
+    .fetch_all(&mut *tx)
+    .await?;
 
     let mut resources = KubernetesResources {
         by_key: BTreeMap::new(),
@@ -472,9 +496,13 @@ async fn get_objects_from_kubernetes(
         by_key: BTreeMap::new(),
         namespaces: BTreeMap::new(),
     };
-    let (clients, types) =
-        get_kubernetes_clients(from_database.by_key.keys().chain(from_database.namespaces.keys()))
-            .await?;
+    let (clients, types) = get_kubernetes_clients(
+        from_database
+            .by_key
+            .keys()
+            .chain(from_database.namespaces.keys()),
+    )
+    .await?;
     for (source, destination) in vec![
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),
@@ -877,7 +905,7 @@ async fn resolve_sisyphus_deployment_image(
     Ok(())
 }
 
-fn generate_single_diff<T : serde::Serialize>(
+fn generate_single_diff<T: serde::Serialize>(
     key: &KubernetesKey,
     have: Option<&T>,
     want: Option<&T>,
@@ -922,4 +950,3 @@ fn print_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> () {
 fn namespace_or_default(namespace: Option<String>) -> String {
     namespace.unwrap_or_else(|| "".to_string())
 }
-

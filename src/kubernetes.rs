@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use kube::{
-    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
+    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -227,16 +227,16 @@ fn munge_single_ignored_fields(
         }
 
         if options.munge_managed_fields {
-          let hm = h
-              .managed_fields()
-              .iter()
-              .find(|m| m.manager == *us)
-              .map(|m| m.fields_v1.as_ref().map(|m| m.0.clone()))
-              .flatten()
-              .unwrap_or(JsonValue::Object(serde_json::Map::new()));
-          let mut hv = serde_json::to_value(&mut *h)?;
-          clear_unmanaged_fields(&mut hv, &hm)?;
-          *h = serde_json::from_value(hv)?;
+            let hm = h
+                .managed_fields()
+                .iter()
+                .find(|m| m.manager == *us)
+                .map(|m| m.fields_v1.as_ref().map(|m| m.0.clone()))
+                .flatten()
+                .unwrap_or(JsonValue::Object(serde_json::Map::new()));
+            let mut hv = serde_json::to_value(&mut *h)?;
+            clear_unmanaged_fields(&mut hv, &hm)?;
+            *h = serde_json::from_value(hv)?;
         }
 
         h.metadata.name = want.metadata.name.clone();
