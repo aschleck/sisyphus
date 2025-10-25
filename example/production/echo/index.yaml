@@ -15,9 +15,9 @@ config:
         name: tokens
         key: secret-token
 footprint:
-  gke_escalante-418502_us-central1_ep-us-central1:
+  gke_acme_us-central1_ap-us-central1:
     replicas: 1
-  gke_escalante-418502_us-west4_ep-us-west4:
+  gke_acme_us-west4_ap-us-west4:
     replicas: 1
 
 ---
@@ -25,9 +25,9 @@ footprint:
 apiVersion: sisyphus/v1
 kind: KubernetesYaml
 metadata:
-  name: some-yaml
+  name: secrets
 sources:
   - secrets.yaml
 clusters:
-  - gke_escalante-418502_us-central1_ep-us-central1
-  - gke_escalante-418502_us-west4_ep-us-west4
+  - gke_acme_us-central1_ap-us-central1
+  - gke_acme_us-west4_ap-us-west4

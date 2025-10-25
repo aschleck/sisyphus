@@ -1,13 +1,12 @@
 def main(ctx):
     return Application(
         args=[
-            1,
-            2,
-            3,
+            "--service_spec",
             {
-                "prod": 4,
-                "dev": 5,
-            }
+                "prod": "backend-prod.svc",
+                "test": "backend-test.svc",
+                "dev": "backend-test.svc",
+            },
         ],
         env={
             "COLOR": "pink",
