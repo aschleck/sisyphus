@@ -24,13 +24,12 @@ pub(crate) struct ConfigImageIndex {
 #[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
 pub(crate) struct Application {
     pub args: Vec<ArgumentValues>,
-    pub binary: BazelTarget,
     pub env: BTreeMap<String, ArgumentValues>,
 }
 
 impl fmt::Display for Application {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "Application(binary={})", self.binary)
+        write!(f, "Application()")
     }
 }
 
@@ -91,20 +90,6 @@ impl ArgumentValues {
 }
 
 #[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
-pub(crate) struct BazelTarget {
-    pub label: String,
-}
-
-impl fmt::Display for BazelTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "BazelTarget(label={})", self.label)
-    }
-}
-
-#[starlark_value(type = "BazelTarget", UnpackValue, StarlarkTypeRepr)]
-impl<'v> StarlarkValue<'v> for BazelTarget {}
-
-#[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
 pub(crate) struct FileVariable {
     pub name: String,
     pub path: String,
@@ -152,7 +137,6 @@ impl<'v> StarlarkValue<'v> for StringVariable {}
 fn starlark_types(builder: &mut GlobalsBuilder) {
     fn Application<'v>(
         #[starlark(require = named)] args: Value,
-        #[starlark(require = named)] binary: Value,
         #[starlark(require = named)] env: Value,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
@@ -161,10 +145,6 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
             .into_iter()
             .map(|v| ArgumentValues::unpack_value(v))
             .collect::<starlark::Result<Vec<_>>>()?;
-        let binary_value = binary
-            .downcast_ref::<BazelTarget>()
-            .ok_or_else(|| function_error("binary must be a BazelTarget"))?
-            .clone();
         let env_value = UnpackDictEntries::<String, Value>::unpack_value(env)?
             .ok_or_else(|| function_error("env must be a list or tuple"))?
             .entries
@@ -173,20 +153,7 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
             .collect::<starlark::Result<BTreeMap<_, _>>>()?;
         Ok(eval.heap().alloc_simple(Application {
             args: args_value,
-            binary: binary_value,
             env: env_value,
-        }))
-    }
-
-    fn BazelTarget<'v>(
-        label: Value,
-        eval: &mut Evaluator<'v, '_, '_>,
-    ) -> starlark::Result<Value<'v>> {
-        let as_str = label
-            .unpack_str()
-            .ok_or_else(|| function_error("label must be a str"))?;
-        Ok(eval.heap().alloc_simple(BazelTarget {
-            label: as_str.to_string(),
         }))
     }
 

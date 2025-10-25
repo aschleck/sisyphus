@@ -1,6 +1,5 @@
 def main(ctx):
     return Application(
-        binary=BazelTarget("//echo:image"),
         args=[
             1,
             2,
