@@ -232,11 +232,17 @@ sisyphus \
     refresh
 ````
 
+# Sharp edges
+
+* Sisyphus automatically adopts namespaces and, when all tracked resources are removed, will delete
+  them. If you have non-Sisyphus resources then they will be automatically deleted.
+
 # What's missing
 
 * [ ] Support for Kubernetes cronjobs
 * [ ] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
 * [ ] `sisyphus run image`: run a config image in an environment and allow specifying the variables
+* [ ] Safe namespace deletions
 * [ ] Starlark `load()` statements to allow code reuse
 * [ ] Resource requests and limits on Sisyphus deployments
 * [ ] Default values for StringVariables so server specs can be overridden when running locally
