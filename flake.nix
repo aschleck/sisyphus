@@ -22,7 +22,7 @@
           ];
         kubectl = pkgs.kubectl;
         python3 = pkgs.python3;
-        rustup = pkgs.rustup;
+        #rustup = pkgs.rustup;
         sqlite = pkgs.sqlite;
       });
     devShells = forAllSystems (system:
@@ -35,6 +35,8 @@
           shellHook = ''
             alias bazel=bazelisk
             export PS1="\[\033[1;32m\][s:\w]\$\[\033[0m\] "
+            echo "build --host_linkopt='-L${pkgs.libiconv}/lib'" > "$(pwd)/.bazelrc_nix"
+            echo "build --linkopt='-L${pkgs.libiconv}/lib'" >> "$(pwd)/.bazelrc_nix"
           '';
         };
       });

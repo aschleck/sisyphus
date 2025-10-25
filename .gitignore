@@ -1,4 +1,4 @@
 .DS_Store
-bazel-*
-sisyphus.db
+.bazelrc_nix
 /target
+bazel-*

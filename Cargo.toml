@@ -19,8 +19,6 @@ serde_json = "1.0.145"
 serde_yaml = "0.9.34"
 similar = "2.7.0"
 sqlx = { version = "0.8.3", features = ["any", "mysql", "postgres", "runtime-tokio", "sqlite", "time", "tls-native-tls"] }
-sqlx-core = "0.8.3"
 starlark = "0.13.0"
 tempfile = "3.23.0"
-time = { version = "0.3.41", features = ["formatting", "std"] }
 tokio = { version = "1.44.1", features = ["macros"] }
