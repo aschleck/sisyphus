@@ -236,6 +236,13 @@ sisyphus \
 
 * Sisyphus automatically adopts namespaces and, when all tracked resources are removed, will delete
   them. If you have non-Sisyphus resources then they will be automatically deleted.
+* The secrets support is a bit idiosyncratic. Sisyphus tries to never clobber anything, and never
+  store an actual secret value in its database. If you edit the secret values or add new secret keys
+  via another tool, they will be untouched. If you add a new secret key via Sisyphus later, it will
+  not clobber any existing values for that key provided it is already aware of the key via a
+  refresh. Note that if you use `kubectl apply` to update your secrets it adds a
+  `kubectl.kubernetes.io/last-applied-configuration` annotation with your secret values and Sisyphus
+  will store those secrets in its database.
 
 # What's missing
 

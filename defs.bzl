@@ -56,12 +56,12 @@ def sisyphus_pushable(
         template = [
           "{",
           "  \"binary_digest\": \"{DIGEST}\",",
-          "  \"binary_image\": \"{BINARY_IMAGE}\",",
+          "  \"binary_repository\": \"{BINARY_REPOSITORY}\",",
           "  \"config_entrypoint\": \"{CONFIG_ENTRYPOINT}\"",
           "}\n",
         ],
         substitutions = {
-            "{BINARY_IMAGE}": binary_repository,
+            "{BINARY_REPOSITORY}": binary_repository,
             "{CONFIG_ENTRYPOINT}": paths.join(native.package_name(), config_entrypoint),
         },
     )

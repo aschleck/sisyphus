@@ -4,17 +4,17 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{get_config, Argument, ArgumentValues},
+    config_image::{Argument, ArgumentValues, get_config},
     kubernetes::{
-        get_kubernetes_api, get_kubernetes_clients, munge_ignored_fields, KubernetesKey,
-        KubernetesResources, MungeOptions, MANAGER,
+        KubernetesKey, KubernetesResources, MANAGER, copy_unspecified_data, get_kubernetes_api,
+        get_kubernetes_clients, munge_secrets,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{Deployment as SisyphusDeployment, HasKind, SisyphusResource, VariableSource},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use console::{style, Style};
+use console::{Style, style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
@@ -28,15 +28,15 @@ use k8s_openapi::api::{
     },
 };
 use kube::{
+    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
-    Error, ResourceExt,
 };
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
 use sqlx::{AnyPool, Row};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::Write,
     path::Path,
@@ -56,6 +56,38 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    Forget {
+        #[arg(long)]
+        api_version: String,
+
+        #[arg(long)]
+        cluster: String,
+
+        #[arg(long)]
+        kind: String,
+
+        #[arg(long)]
+        name: String,
+
+        #[arg(long)]
+        namespace: Option<String>,
+    },
+    Import {
+        #[arg(long)]
+        api_version: String,
+
+        #[arg(long)]
+        cluster: String,
+
+        #[arg(long)]
+        kind: String,
+
+        #[arg(long)]
+        name: String,
+
+        #[arg(long)]
+        namespace: Option<String>,
+    },
     Push {
         // The namespace to label resources with
         #[arg(long, env = "LABEL_NAMESPACE", default_value = "april.dev")]
@@ -76,12 +108,166 @@ async fn main() -> Result<()> {
     let pool = AnyPool::connect(&args.database_url).await?;
 
     match args.command {
+        Commands::Forget {
+            api_version,
+            cluster,
+            kind,
+            name,
+            namespace,
+        } => {
+            forget(
+                KubernetesKey {
+                    api_version,
+                    cluster,
+                    kind,
+                    name,
+                    namespace,
+                },
+                &pool,
+            )
+            .await?
+        }
+        Commands::Import {
+            api_version,
+            cluster,
+            kind,
+            name,
+            namespace,
+        } => {
+            import(
+                KubernetesKey {
+                    api_version,
+                    cluster,
+                    kind,
+                    name,
+                    namespace,
+                },
+                &pool,
+            )
+            .await?
+        }
         Commands::Push {
             label_namespace,
             monitor_directory,
         } => push(&label_namespace, &monitor_directory, &pool).await?,
         Commands::Refresh => refresh(&pool).await?,
     };
+    Ok(())
+}
+
+async fn forget(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        SELECT yaml
+        FROM kubernetes_objects
+        WHERE
+          api_version = $1
+          AND cluster = $2
+          AND kind = $3
+          AND name = $4
+          AND namespace = $5
+        "#,
+    )
+    .bind(key.api_version.clone())
+    .bind(key.cluster.clone())
+    .bind(key.kind.clone())
+    .bind(key.name.clone())
+    .bind(namespace_or_default(key.namespace.clone()))
+    .fetch_all(pool)
+    .await?;
+    let Some(first) = result.iter().next() else {
+        bail!("No such object")
+    };
+    let as_yaml: String = first.get("yaml");
+    let diff = TextDiff::from_lines(as_yaml.as_str(), "");
+    println!("• {} {}\n", style("forget").red(), key);
+    print_diff(&diff);
+    println!("");
+
+    if !ask_for_user_permission("forgetting")? {
+        return Ok(());
+    }
+
+    let result = sqlx::query(
+        r#"
+        DELETE FROM kubernetes_objects
+        WHERE
+          api_version = $1
+          AND cluster = $2
+          AND kind = $3
+          AND name = $4
+          AND namespace = $5
+        "#,
+    )
+    .bind(key.api_version.clone())
+    .bind(key.cluster.clone())
+    .bind(key.kind.clone())
+    .bind(key.name.clone())
+    .bind(namespace_or_default(key.namespace.clone()))
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        bail!("Unable to find object {}", key);
+    } else {
+        println!("Forgot {}", key);
+    }
+    Ok(())
+}
+
+async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
+    let result = sqlx::query(
+        r#"
+        SELECT name
+        FROM kubernetes_objects
+        WHERE
+          api_version = $1
+          AND cluster = $2
+          AND kind = $3
+          AND name = $4
+          AND namespace = $5
+        "#,
+    )
+    .bind(key.api_version.clone())
+    .bind(key.cluster.clone())
+    .bind(key.kind.clone())
+    .bind(key.name.clone())
+    .bind(namespace_or_default(key.namespace.clone()))
+    .fetch_all(pool)
+    .await?;
+    if result.len() > 0 {
+        bail!("Object {} already exists", key);
+    }
+
+    let (clients, types) = get_kubernetes_clients([&key]).await?;
+    let api = get_kubernetes_api(&key, &clients, &types)?;
+    let mut object = api.get(&key.name).await?;
+    munge_secrets(None, &mut object)?;
+    let as_yaml = serde_yaml::to_string(&object)?;
+    let diff = TextDiff::from_lines("", &as_yaml);
+    println!("• {} {}\n", style("import").green(), key);
+    print_diff(&diff);
+    println!("");
+
+    if !ask_for_user_permission("importing")? {
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO kubernetes_objects (api_version, cluster, kind, name, namespace, yaml)
+        VALUES ($1, $2, $3, $4, $5, $6)
+        "#,
+    )
+    .bind(key.api_version.clone())
+    .bind(key.cluster.clone())
+    .bind(key.kind.clone())
+    .bind(key.name.clone())
+    .bind(namespace_or_default(key.namespace.clone()))
+    .bind(as_yaml)
+    .execute(pool)
+    .await?;
+    println!("Imported {}", key);
+
     Ok(())
 }
 
@@ -138,141 +324,43 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
     }
 
-    let mut from_database = get_objects_from_database(&pool).await?;
-    munge_ignored_fields(
-        &mut from_database,
-        &mut from_files,
-        MungeOptions {
-            munge_managed_fields: true,
-            munge_secret_data: true,
-        },
-    )?;
-    let changed = generate_diff(&from_database, &from_files)?;
-    if !changed {
+    let from_database = get_objects_from_database(&pool).await?;
+    for (k, to) in &mut from_files.by_key {
+        munge_secrets(from_database.by_key.get(&k), to)?;
+    }
+    let (comparable_database, comparable_files) =
+        copy_unspecified_data(from_database.clone(), from_files.clone())?;
+    let changed = generate_diff(&comparable_database, &comparable_files)?;
+    if changed.len() == 0 {
         println!("Nothing to do");
         return Ok(());
     }
 
-    print!("Continue pushing? y/(n): ");
-    std::io::stdout().flush()?;
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response)?;
-    match response.trim().to_lowercase().as_str() {
-        "y" => {
-            apply_diff(&from_database, &from_files, &pool).await?;
-        }
-        _ => {
-            println!("Canceled");
-        }
+    if !ask_for_user_permission("pushing")? {
+        return Ok(());
     }
 
+    apply_diff(&changed, &from_database, &from_files, &pool).await?;
     Ok(())
 }
 
 async fn refresh(pool: &AnyPool) -> Result<()> {
-    let mut from_database = get_objects_from_database(&pool).await?;
+    let from_database = get_objects_from_database(&pool).await?;
     let mut from_kubernetes = get_objects_from_kubernetes(&from_database).await?;
-    munge_ignored_fields(
-        &mut from_database,
-        &mut from_kubernetes,
-        MungeOptions {
-            munge_managed_fields: false,
-            munge_secret_data: true,
-        },
-    )?;
+    for (k, to) in &mut from_kubernetes.by_key {
+        munge_secrets(from_database.by_key.get(k), to)?;
+    }
     let changed = generate_diff(&from_database, &from_kubernetes)?;
-    if !changed {
+    if changed.len() == 0 {
         println!("Nothing to do");
         return Ok(());
     }
 
-    print!("Continue refreshing? y/(n): ");
-    std::io::stdout().flush()?;
-    let mut response = String::new();
-    std::io::stdin().read_line(&mut response)?;
-    match response.trim().to_lowercase().as_str() {
-        "y" => {
-            apply_refresh(&from_database, &from_kubernetes, &pool).await?;
-        }
-        _ => {
-            println!("Canceled");
-        }
+    if !ask_for_user_permission("refreshing")? {
+        return Ok(());
     }
 
-    Ok(())
-}
-
-async fn apply_refresh(
-    from_database: &KubernetesResources,
-    from_kubernetes: &KubernetesResources,
-    pool: &AnyPool,
-) -> Result<()> {
-    refresh_group(&from_database.by_key, &from_kubernetes.by_key, &pool).await?;
-    refresh_group(
-        &from_database.namespaces,
-        &from_kubernetes.namespaces,
-        &pool,
-    )
-    .await?;
-    Ok(())
-}
-
-async fn refresh_group(
-    have: &BTreeMap<KubernetesKey, DynamicObject>,
-    want: &BTreeMap<KubernetesKey, DynamicObject>,
-    pool: &AnyPool,
-) -> Result<()> {
-    for (key, h) in have {
-        match want.get(key) {
-            Some(w) => {
-                if h == w {
-                    continue;
-                }
-                sqlx::query(
-                    r#"
-                    UPDATE kubernetes_objects
-                    SET last_updated = CURRENT_TIMESTAMP, yaml = $1
-                    WHERE
-                        api_version = $2
-                        AND cluster = $3
-                        AND kind = $4
-                        AND name = $5
-                        AND namespace = $6
-                    "#,
-                )
-                .bind(serde_yaml::to_string(&w)?)
-                .bind(key.api_version.clone())
-                .bind(key.cluster.clone())
-                .bind(key.kind.clone())
-                .bind(key.name.clone())
-                .bind(namespace_or_default(key.namespace.clone()))
-                .execute(pool)
-                .await?;
-                println!("Updated {}", key);
-            }
-            None => {
-                sqlx::query(
-                    r#"
-                    DELETE FROM kubernetes_objects
-                    WHERE
-                        api_version = $1
-                        AND cluster = $2
-                        AND kind = $3
-                        AND name = $4
-                        AND namespace = $5
-                    "#,
-                )
-                .bind(key.api_version.clone())
-                .bind(key.cluster.clone())
-                .bind(key.kind.clone())
-                .bind(key.name.clone())
-                .bind(namespace_or_default(key.namespace.clone()))
-                .execute(pool)
-                .await?;
-                println!("Deleted {}", key);
-            }
-        };
-    }
+    apply_refresh(&changed, &from_database, &from_kubernetes, &pool).await?;
     Ok(())
 }
 
@@ -289,15 +377,18 @@ struct SisyphusResources {
     global_by_key: HashMap<SisyphusKey, SisyphusResource>,
 }
 
-fn generate_diff(have: &KubernetesResources, want: &KubernetesResources) -> Result<bool> {
-    let mut changes = 0;
+fn generate_diff<'a>(
+    have: &'a KubernetesResources,
+    want: &'a KubernetesResources,
+) -> Result<HashSet<&'a KubernetesKey>> {
+    let mut changed = HashSet::new();
     for (key, w) in &want.namespaces {
         let h = have.namespaces.get(&key);
         if h == Some(w) {
             continue;
         }
         generate_single_diff(key, h, Some(w))?;
-        changes += 1;
+        changed.insert(key);
     }
 
     for (key, w) in &want.by_key {
@@ -306,27 +397,28 @@ fn generate_diff(have: &KubernetesResources, want: &KubernetesResources) -> Resu
             continue;
         }
         generate_single_diff(key, h, Some(w))?;
-        changes += 1;
+        changed.insert(key);
     }
 
     for (key, h) in &have.by_key {
         if !want.by_key.contains_key(&key) {
             generate_single_diff(key, Some(h), None)?;
-            changes += 1;
+            changed.insert(key);
         }
     }
 
     for (key, h) in &have.namespaces {
         if !want.namespaces.contains_key(&key) {
             generate_single_diff(key, Some(h), None)?;
-            changes += 1;
+            changed.insert(key);
         }
     }
 
-    Ok(changes > 0)
+    Ok(changed)
 }
 
 async fn apply_diff(
+    changed: &HashSet<&KubernetesKey>,
     have: &KubernetesResources,
     want: &KubernetesResources,
     pool: &AnyPool,
@@ -336,35 +428,44 @@ async fn apply_diff(
 
     for (key, w) in &want.namespaces {
         let api = get_kubernetes_api(key, &clients, &types)?;
-        apply_single_diff(&key, have.namespaces.get(&key), Some(w), &api, pool).await?;
+        apply_single_diff(
+            changed,
+            &key,
+            have.namespaces.get(&key),
+            Some(w),
+            &api,
+            pool,
+        )
+        .await?;
     }
     for (key, w) in &want.by_key {
         let api = get_kubernetes_api(key, &clients, &types)?;
-        apply_single_diff(&key, have.by_key.get(&key), Some(w), &api, pool).await?;
+        apply_single_diff(changed, &key, have.by_key.get(&key), Some(w), &api, pool).await?;
     }
     for (key, h) in &have.by_key {
         if !want.by_key.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(&key, Some(h), None, &api, pool).await?;
+            apply_single_diff(changed, &key, Some(h), None, &api, pool).await?;
         }
     }
     for (key, h) in &have.namespaces {
         if !want.namespaces.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(&key, Some(h), None, &api, pool).await?;
+            apply_single_diff(changed, &key, Some(h), None, &api, pool).await?;
         }
     }
     Ok(())
 }
 
 async fn apply_single_diff(
+    changed: &HashSet<&KubernetesKey>,
     key: &KubernetesKey,
     have: Option<&DynamicObject>,
     want: Option<&DynamicObject>,
     api: &kube::Api<DynamicObject>,
     pool: &AnyPool,
 ) -> Result<()> {
-    if have == want {
+    if !changed.contains(key) {
         return Ok(());
     }
 
@@ -454,6 +555,90 @@ async fn apply_single_diff(
     Ok(())
 }
 
+async fn apply_refresh(
+    changed: &HashSet<&KubernetesKey>,
+    from_database: &KubernetesResources,
+    from_kubernetes: &KubernetesResources,
+    pool: &AnyPool,
+) -> Result<()> {
+    refresh_group(
+        &changed,
+        &from_database.by_key,
+        &from_kubernetes.by_key,
+        &pool,
+    )
+    .await?;
+    refresh_group(
+        &changed,
+        &from_database.namespaces,
+        &from_kubernetes.namespaces,
+        &pool,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn refresh_group(
+    changed: &HashSet<&KubernetesKey>,
+    have: &BTreeMap<KubernetesKey, DynamicObject>,
+    want: &BTreeMap<KubernetesKey, DynamicObject>,
+    pool: &AnyPool,
+) -> Result<()> {
+    for key in have.keys() {
+        if !changed.contains(key) {
+            continue;
+        }
+
+        match want.get(key) {
+            Some(w) => {
+                sqlx::query(
+                    r#"
+                    UPDATE kubernetes_objects
+                    SET last_updated = CURRENT_TIMESTAMP, yaml = $1
+                    WHERE
+                        api_version = $2
+                        AND cluster = $3
+                        AND kind = $4
+                        AND name = $5
+                        AND namespace = $6
+                    "#,
+                )
+                .bind(serde_yaml::to_string(&w)?)
+                .bind(key.api_version.clone())
+                .bind(key.cluster.clone())
+                .bind(key.kind.clone())
+                .bind(key.name.clone())
+                .bind(namespace_or_default(key.namespace.clone()))
+                .execute(pool)
+                .await?;
+                println!("Updated {}", key);
+            }
+            None => {
+                sqlx::query(
+                    r#"
+                    DELETE FROM kubernetes_objects
+                    WHERE
+                        api_version = $1
+                        AND cluster = $2
+                        AND kind = $3
+                        AND name = $4
+                        AND namespace = $5
+                    "#,
+                )
+                .bind(key.api_version.clone())
+                .bind(key.cluster.clone())
+                .bind(key.kind.clone())
+                .bind(key.name.clone())
+                .bind(namespace_or_default(key.namespace.clone()))
+                .execute(pool)
+                .await?;
+                println!("Deleted {}", key);
+            }
+        };
+    }
+    Ok(())
+}
+
 async fn get_objects_from_database(pool: &AnyPool) -> Result<KubernetesResources> {
     let mut tx = pool.begin().await?;
     let recs = sqlx::query(
@@ -503,7 +688,7 @@ async fn get_objects_from_kubernetes(
             .chain(from_database.namespaces.keys()),
     )
     .await?;
-    for (source, destination) in vec![
+    for (source, destination) in [
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),
     ] {
@@ -687,17 +872,10 @@ async fn render_sisyphus_resource(
             independent_spec.template.metadata = Some(template_metadata);
             let mut container = Container::default();
             container.name = v.metadata.name.clone();
-            container.image = Some(
-                RegistryReference::new(
-                    Some(image.registry()),
-                    index.binary_image,
-                    Some(RegistryVersion::from_str(&format!(
-                        "@{}",
-                        index.binary_digest
-                    ))?),
-                )
-                .to_string(),
-            );
+            container.image = Some(format!(
+                "{}@{}",
+                index.binary_repository, index.binary_digest
+            ));
             let mut ports = Vec::new();
             let mut volumes = Vec::new();
             let mut volume_mounts = Vec::new();
@@ -934,6 +1112,20 @@ fn generate_single_diff<T: serde::Serialize>(
     print_diff(&diff);
     println!("");
     Ok(())
+}
+
+fn ask_for_user_permission(verb: &str) -> Result<bool> {
+    print!("Continue {}? y/(n): ", verb);
+    std::io::stdout().flush()?;
+    let mut response = String::new();
+    std::io::stdin().read_line(&mut response)?;
+    Ok(match response.trim().to_lowercase().as_str() {
+        "y" => true,
+        _ => {
+            println!("Canceled");
+            false
+        }
+    })
 }
 
 fn print_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> () {

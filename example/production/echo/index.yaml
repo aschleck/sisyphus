@@ -4,7 +4,7 @@ metadata:
   name: echo
 config:
   env: prod
-  image: purple.local:5001/sisyphus/example/echo_config:latest
+  image: us-docker.pkg.dev/acme/containers/echo_config:latest
   variables:
     google-credentials:
       secretKeyRef:

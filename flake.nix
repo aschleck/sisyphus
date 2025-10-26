@@ -22,7 +22,7 @@
           ];
         kubectl = pkgs.kubectl;
         python3 = pkgs.python3;
-        #rustup = pkgs.rustup;
+        rustup = pkgs.rustup;
         sqlite = pkgs.sqlite;
       });
     devShells = forAllSystems (system:

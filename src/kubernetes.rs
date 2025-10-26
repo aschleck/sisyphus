@@ -1,9 +1,9 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use kube::{
+    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
-    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -34,7 +34,7 @@ impl fmt::Display for KubernetesKey {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct KubernetesResources {
     pub by_key: BTreeMap<KubernetesKey, DynamicObject>,
     pub namespaces: BTreeMap<KubernetesKey, DynamicObject>,
@@ -42,77 +42,120 @@ pub(crate) struct KubernetesResources {
 
 pub(crate) const MANAGER: &str = "sisyphus";
 
-pub(crate) fn clear_unmanaged_fields(value: &mut JsonValue, managed: &JsonValue) -> Result<()> {
-    match (value, managed) {
-        (JsonValue::Array(value), JsonValue::Object(managed)) => {
-            if managed.len() == 0 {
-                // We own the entire object, check nothing
-                return Ok(());
-            }
+struct Selector<'a> {
+    data: &'a JsonValue,
+    matcher: serde_json::Map<String, JsonValue>,
+    used: bool,
+}
 
+pub(crate) fn copy_unmanaged_fields(
+    have: &JsonValue,
+    want: &JsonValue,
+    managed: &JsonValue,
+) -> Result<JsonValue> {
+    match (have, want, managed) {
+        (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Object(m)) => {
+            // Try to find the matching rules for every key
             let mut selectors = Vec::new();
-            for (k, v) in managed {
+            for (k, v) in m {
                 let Some((t, s)) = k.split_once(":") else {
                     bail!("Unknown selector {}", k);
                 };
                 if t != "k" {
                     bail!("Unknown type of selector {}", t);
                 }
-                selectors.push((
-                    serde_json::from_str::<serde_json::Map<String, JsonValue>>(s)?,
-                    v,
-                ));
+                selectors.push(Selector {
+                    data: v,
+                    matcher: serde_json::from_str::<serde_json::Map<String, JsonValue>>(s)?,
+                    used: false,
+                });
             }
 
-            let mut managers = Vec::new();
-            value.retain_mut(|item| {
-                for (selector, managed) in &selectors {
-                    let mut matches = true;
-                    for (k, v) in selector {
-                        if item.get(k) != Some(v) {
-                            matches = false;
-                            break;
+            let mut copy = Vec::new();
+            for i in 0..w.len() {
+                let new_value = if i < h.len() {
+                    let hv = h.get(i).unwrap();
+                    let wv = w.get(i).unwrap();
+                    let mv = selectors.iter_mut().find_map(|selector| {
+                        if selector.used {
+                            return None;
                         }
-                    }
+                        let mut matches = true;
+                        for (k, v) in &selector.matcher {
+                            if wv.get(k) != Some(v) {
+                                matches = false;
+                                break;
+                            }
+                        }
 
-                    if matches {
-                        managers.push(managed);
-                        return true;
-                    }
-                }
-                false
-            });
-
-            for i in 0..value.len() {
-                clear_unmanaged_fields(value.get_mut(i).unwrap(), managers.get(i).unwrap())?;
+                        if matches {
+                            selector.used = true;
+                            return Some(selector.data);
+                        } else {
+                            return None;
+                        }
+                    });
+                    copy_unmanaged_fields(hv, wv, mv.unwrap_or(&JsonValue::Null))?
+                } else {
+                    w.get(i).unwrap().clone()
+                };
+                copy.push(new_value);
             }
+            Ok(JsonValue::Array(copy))
         }
-        (JsonValue::Object(value), JsonValue::Object(managed)) => {
-            if managed.len() == 0 {
-                // We own the entire object, check nothing
-                return Ok(());
+        (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Null) => {
+            // If we don't already own anything, merge the keys half-heartedly
+            let mut copy = Vec::new();
+            for i in 0..w.len() {
+                let new_value = if i < h.len() {
+                    copy_unmanaged_fields(h.get(i).unwrap(), w.get(i).unwrap(), &JsonValue::Null)?
+                } else {
+                    w.get(i).unwrap().clone()
+                };
+                copy.push(new_value);
             }
-
-            let keys = value
-                .keys()
-                .into_iter()
-                .map(|k| k.clone())
-                .collect::<Vec<_>>();
-            for k in keys {
-                match managed.get(&format!("f:{}", k)) {
-                    Some(m) => {
-                        let v = value.get_mut(&k).unwrap();
-                        clear_unmanaged_fields(v, m)?;
-                    }
-                    None => {
-                        value.remove(&k);
-                    }
-                }
-            }
+            Ok(JsonValue::Array(copy))
         }
-        _ => {}
+        (JsonValue::Object(h), JsonValue::Object(w), JsonValue::Object(managed)) => {
+            // When we are adding keys but don't own anything currently, merge all the existing
+            // keys according to our merge instructions and then plop our remaining ones on top
+            let mut copy = serde_json::Map::new();
+            let mut remaining = w.clone();
+            for (k, v) in h {
+                let new_value = copy_unmanaged_fields(
+                    v,
+                    &remaining.remove(k).unwrap_or(JsonValue::Null),
+                    managed.get(&format!("f:{}", k)).unwrap_or(&JsonValue::Null),
+                )?;
+                copy.insert(k.clone(), new_value);
+            }
+            for (k, v) in remaining {
+                copy.insert(k.clone(), v.clone());
+            }
+            Ok(JsonValue::Object(copy))
+        }
+        (JsonValue::Object(h), JsonValue::Object(w), JsonValue::Null) => {
+            // When we are adding keys but don't own anything currently, merge all the existing
+            // keys and then plop our remaining ones on top
+            let mut copy = serde_json::Map::new();
+            let mut remaining = w.clone();
+            for (k, v) in h {
+                let new_value = copy_unmanaged_fields(
+                    v,
+                    &remaining.remove(k).unwrap_or(JsonValue::Null),
+                    &JsonValue::Null,
+                )?;
+                copy.insert(k.clone(), new_value);
+            }
+            for (k, v) in remaining {
+                copy.insert(k, v);
+            }
+            Ok(JsonValue::Object(copy))
+        }
+        (_, JsonValue::Null, JsonValue::Object(_)) => Ok(want.clone()),
+        (_, JsonValue::Null, JsonValue::Null) => Ok(have.clone()),
+        _ => Ok(want.clone()),
     }
-    Ok(())
 }
 
 pub(crate) async fn get_kubernetes_clients(
@@ -166,82 +209,103 @@ pub(crate) fn get_kubernetes_api(
     })
 }
 
-pub(crate) struct MungeOptions {
-    pub munge_managed_fields: bool,
-    pub munge_secret_data: bool,
+pub(crate) fn copy_unspecified_data(
+    mut from: KubernetesResources,
+    mut to: KubernetesResources,
+) -> Result<(KubernetesResources, KubernetesResources)> {
+    let us = Some(MANAGER.to_string());
+    for (key, w) in &mut to.by_key {
+        copy_single_unspecified_data(from.by_key.get_mut(&key), w, &us)?;
+    }
+    for (key, w) in &mut to.namespaces {
+        copy_single_unspecified_data(from.namespaces.get_mut(&key), w, &us)?;
+    }
+
+    Ok((from, to))
 }
 
-pub(crate) fn munge_ignored_fields(
-    have: &mut KubernetesResources,
-    want: &mut KubernetesResources,
-    options: MungeOptions,
+fn copy_single_unspecified_data(
+    have: Option<&mut DynamicObject>,
+    want: &mut DynamicObject,
+    us: &Option<String>,
 ) -> Result<()> {
-    let us = Some(MANAGER.to_string());
+    if let Some(h) = have {
+        let hm = h
+            .managed_fields()
+            .iter()
+            .find(|m| m.manager == *us)
+            .map(|m| m.fields_v1.as_ref().map(|m| m.0.clone()))
+            .flatten()
+            .unwrap_or(JsonValue::Null);
+        let copied = copy_unmanaged_fields(
+            &serde_json::to_value(&mut *h)?,
+            &serde_json::to_value(&mut *want)?,
+            &hm,
+        )?;
+        *want = serde_json::from_value(copied)?;
 
-    for (key, w) in &mut want.by_key {
-        munge_single_ignored_fields(&key, have.by_key.get_mut(&key), w, &options, &us)?;
-    }
-    for (key, w) in &mut want.namespaces {
-        munge_single_ignored_fields(&key, have.namespaces.get_mut(&key), w, &options, &us)?;
+        h.metadata.managed_fields = None;
+        want.metadata.managed_fields = None;
+
+        // In case of generateName, copy the name
+        h.metadata.name = want.metadata.name.clone();
+        // We don't expect a namespace to be set, so copy the old one
+        h.metadata.namespace = want.metadata.namespace.clone();
     }
     Ok(())
 }
 
-fn munge_single_ignored_fields(
-    key: &KubernetesKey,
-    have: Option<&mut DynamicObject>,
-    want: &mut DynamicObject,
-    options: &MungeOptions,
-    us: &Option<String>,
-) -> Result<()> {
-    if let Some(h) = have {
-        if options.munge_secret_data && key.api_version == "v1" && key.kind == "Secret" {
-            let hd = h
-                .data
-                .as_object()
-                .ok_or_else(|| anyhow!("data must be an object"))?;
-            let wd = want
-                .data
-                .as_object_mut()
-                .ok_or_else(|| anyhow!("data must be an object"))?;
-            wd.remove("stringData");
-            wd.insert(
-                "data".to_string(),
-                hd.get("data").map_or(JsonValue::Null, |v| v.clone()),
-            );
+pub(crate) fn munge_secrets(from: Option<&DynamicObject>, to: &mut DynamicObject) -> Result<()> {
+    let is_secret = to
+        .types
+        .as_ref()
+        .map(|t| t.api_version == "v1" && t.kind == "Secret")
+        .unwrap_or(false);
+    if !is_secret {
+        return Ok(());
+    }
 
-            if options.munge_managed_fields {
-                let hm = h
-                    .managed_fields_mut()
-                    .iter_mut()
-                    .find(|m| m.manager == *us)
-                    .map(|m| m.fields_v1.as_mut())
-                    .flatten()
-                    .map(|m| m.0.as_object_mut())
-                    .flatten();
-                if let Some(hmo) = hm {
-                    hmo.remove("f:stringData")
-                        .map(|v| hmo.insert("f:data".to_string(), v));
-                }
+    let fd = from
+        .map(|v| v.data.as_object())
+        .flatten()
+        .map(|v| v.get("data"))
+        .flatten()
+        .map(|v| v.as_object())
+        .flatten();
+    let t = to
+        .data
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("data must be an object"))?;
+    if let Some(fdd) = fd {
+        // This is the case where we are refreshing or pushing an existing object
+        let tdd = t
+            .entry("data")
+            .or_insert_with(|| JsonValue::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| anyhow!("data must be an object"))?;
+        for (k, v) in fdd {
+            tdd.insert(k.clone(), v.clone());
+        }
+        for (k, v) in tdd.iter_mut() {
+            if !fdd.contains_key(k) {
+                *v = JsonValue::String("c29tZSBzdHVmZg==".to_string()); // "replace-me"
             }
         }
-
-        if options.munge_managed_fields {
-            let hm = h
-                .managed_fields()
-                .iter()
-                .find(|m| m.manager == *us)
-                .map(|m| m.fields_v1.as_ref().map(|m| m.0.clone()))
-                .flatten()
-                .unwrap_or(JsonValue::Object(serde_json::Map::new()));
-            let mut hv = serde_json::to_value(&mut *h)?;
-            clear_unmanaged_fields(&mut hv, &hm)?;
-            *h = serde_json::from_value(hv)?;
+    } else if let Some(tdd) = t.get_mut("data").map(|v| v.as_object_mut()).flatten() {
+        // This is the case where we are importing or pushing a new object. We replace all data
+        // because we don't think the user is putting actual secrets in anyway.
+        for v in tdd.values_mut() {
+            *v = JsonValue::String("c29tZSBzdHVmZg==".to_string()); // "replace-me"
         }
+    }
 
-        h.metadata.name = want.metadata.name.clone();
-        h.metadata.namespace = want.metadata.namespace.clone();
-        h.types = want.types.clone();
+    if let Some(tsd) = t.get_mut("stringData").map(|v| v.as_object_mut()).flatten() {
+        for k in fd.unwrap_or(&serde_json::Map::new()).keys() {
+            tsd.remove(k);
+        }
+        if tsd.len() == 0 {
+            t.remove("stringData");
+        }
     }
     Ok(())
 }
