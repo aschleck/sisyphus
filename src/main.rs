@@ -20,7 +20,6 @@ use docker_registry::{
     render as containerRender,
 };
 use futures::future::try_join_all;
-use json_patch::{PatchOperation, RemoveOperation, jsonptr::PointerBuf};
 use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec},
     core::v1::{
@@ -34,10 +33,11 @@ use kube::{
     core::ErrorResponse,
 };
 use serde::Deserialize;
+use serde_json::Value as JsonValue;
 use similar::{ChangeTag, TextDiff};
 use sqlx::{AnyPool, Row};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::Write,
     path::Path,
@@ -344,7 +344,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
         munge_secrets(from, to)?;
     }
-    let (comparable_database, comparable_files, remove_patches) =
+    let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
     let changed = generate_diff(&comparable_database, &comparable_files)?;
     if changed.len() == 0 {
@@ -356,14 +356,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         return Ok(());
     }
 
-    apply_diff(
-        &changed,
-        &from_database,
-        &from_files,
-        &remove_patches,
-        &pool,
-    )
-    .await?;
+    apply_diff(&changed, &from_database, &from_files, &pool).await?;
     Ok(())
 }
 
@@ -403,15 +396,18 @@ struct SisyphusResources {
 fn generate_diff<'a>(
     have: &'a KubernetesResources,
     want: &'a KubernetesResources,
-) -> Result<HashSet<&'a KubernetesKey>> {
-    let mut changed = HashSet::new();
+) -> Result<HashMap<&'a KubernetesKey, json_patch::Patch>> {
+    let mut changed = HashMap::new();
     for (key, w) in &want.namespaces {
         let h = have.namespaces.get(&key);
         if h == Some(w) {
             continue;
         }
         generate_single_diff(key, h, Some(w))?;
-        changed.insert(key);
+        changed.insert(
+            key,
+            json_patch::diff(&serde_json::to_value(h)?, &serde_json::to_value(w)?),
+        );
     }
 
     for (key, w) in &want.by_key {
@@ -420,20 +416,29 @@ fn generate_diff<'a>(
             continue;
         }
         generate_single_diff(key, h, Some(w))?;
-        changed.insert(key);
+        changed.insert(
+            key,
+            json_patch::diff(&serde_json::to_value(h)?, &serde_json::to_value(w)?),
+        );
     }
 
     for (key, h) in &have.by_key {
         if !want.by_key.contains_key(&key) {
             generate_single_diff(key, Some(h), None)?;
-            changed.insert(key);
+            changed.insert(
+                key,
+                json_patch::diff(&serde_json::to_value(h)?, &JsonValue::Null),
+            );
         }
     }
 
     for (key, h) in &have.namespaces {
         if !want.namespaces.contains_key(&key) {
             generate_single_diff(key, Some(h), None)?;
-            changed.insert(key);
+            changed.insert(
+                key,
+                json_patch::diff(&serde_json::to_value(h)?, &JsonValue::Null),
+            );
         }
     }
 
@@ -441,10 +446,9 @@ fn generate_diff<'a>(
 }
 
 async fn apply_diff(
-    changed: &HashSet<&KubernetesKey>,
+    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
     have: &KubernetesResources,
     want: &KubernetesResources,
-    remove_patches: &HashMap<KubernetesKey, Vec<String>>,
     pool: &AnyPool,
 ) -> Result<()> {
     let (clients, types) =
@@ -453,11 +457,10 @@ async fn apply_diff(
     for (key, w) in &want.namespaces {
         let api = get_kubernetes_api(key, &clients, &types)?;
         apply_single_diff(
-            changed,
+            changed.get(key),
             &key,
             have.namespaces.get(&key),
             Some(w),
-            remove_patches.get(&key),
             &api,
             pool,
         )
@@ -466,11 +469,10 @@ async fn apply_diff(
     for (key, w) in &want.by_key {
         let api = get_kubernetes_api(key, &clients, &types)?;
         apply_single_diff(
-            changed,
+            changed.get(key),
             &key,
             have.by_key.get(&key),
             Some(w),
-            remove_patches.get(&key),
             &api,
             pool,
         )
@@ -479,84 +481,35 @@ async fn apply_diff(
     for (key, h) in &have.by_key {
         if !want.by_key.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(
-                changed,
-                &key,
-                Some(h),
-                None,
-                remove_patches.get(&key),
-                &api,
-                pool,
-            )
-            .await?;
+            apply_single_diff(changed.get(key), &key, Some(h), None, &api, pool).await?;
         }
     }
     for (key, h) in &have.namespaces {
         if !want.namespaces.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(
-                changed,
-                &key,
-                Some(h),
-                None,
-                remove_patches.get(&key),
-                &api,
-                pool,
-            )
-            .await?;
+            apply_single_diff(changed.get(key), &key, Some(h), None, &api, pool).await?;
         }
     }
     Ok(())
 }
 
 async fn apply_single_diff(
-    changed: &HashSet<&KubernetesKey>,
+    changed: Option<&json_patch::Patch>,
     key: &KubernetesKey,
     have: Option<&DynamicObject>,
     want: Option<&DynamicObject>,
-    remove_patches: Option<&Vec<String>>,
     api: &kube::Api<DynamicObject>,
     pool: &AnyPool,
 ) -> Result<()> {
-    if !changed.contains(key) {
-        return Ok(());
-    }
+    let Some(patch) = changed else { return Ok(()) };
 
     match (have, want) {
         (Some(_), Some(w)) => {
-            let mut editable = w.clone();
-            // This *horrific*, how do I do this better? I can't just calculate the jsonpatch diff
-            // because `have` has a bunch of fields like `status` and `want` has none of them.
-            // Maybe I should be jsonpatching off the result of the compare and not using apply at
-            // all?
-            match remove_patches {
-                None => {}
-                Some(patches) => {
-                    let operations = json_patch::Patch(
-                        patches
-                            .iter()
-                            .map(|p| {
-                                PatchOperation::Remove(RemoveOperation {
-                                    path: PointerBuf::from_str(p).unwrap(),
-                                })
-                            })
-                            .collect(),
-                    );
-                    let after = api
-                        .patch(
-                            &w.name_any(),
-                            &PatchParams::apply(MANAGER),
-                            &Patch::<()>::Json(operations),
-                        )
-                        .await?;
-                    editable.metadata.resource_version = after.metadata.resource_version
-                }
-            };
             let result = api
                 .patch(
                     &w.name_any(),
-                    &PatchParams::apply(MANAGER).force(),
-                    &Patch::Apply(editable),
+                    &PatchParams::apply(MANAGER),
+                    &Patch::<()>::Json(patch.clone()),
                 )
                 .await
                 .with_context(|| format!("while updating {}", key))?;
@@ -637,7 +590,7 @@ async fn apply_single_diff(
 }
 
 async fn apply_refresh(
-    changed: &HashSet<&KubernetesKey>,
+    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
     from_database: &KubernetesResources,
     from_kubernetes: &KubernetesResources,
     pool: &AnyPool,
@@ -660,13 +613,13 @@ async fn apply_refresh(
 }
 
 async fn refresh_group(
-    changed: &HashSet<&KubernetesKey>,
+    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
     have: &BTreeMap<KubernetesKey, DynamicObject>,
     want: &BTreeMap<KubernetesKey, DynamicObject>,
     pool: &AnyPool,
 ) -> Result<()> {
     for key in have.keys() {
-        if !changed.contains(key) {
+        if !changed.contains_key(key) {
             continue;
         }
 

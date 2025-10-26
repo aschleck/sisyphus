@@ -48,12 +48,10 @@ struct Selector<'a> {
     used: bool,
 }
 
-pub(crate) fn copy_unmanaged_fields(
+fn copy_unmanaged_fields(
     have: &JsonValue,
     want: &JsonValue,
     managed: &JsonValue,
-    path: &mut Vec<String>,
-    remove_patches: &mut Vec<String>,
 ) -> Result<JsonValue> {
     match (have, want, managed) {
         (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Object(m)) => {
@@ -97,32 +95,7 @@ pub(crate) fn copy_unmanaged_fields(
                             return None;
                         }
                     });
-                    if let JsonValue::Null = wv {
-                        // If we're explicitly setting a value to null and it used to have a
-                        // value that we didn't own, we're probably trying to clear it
-                        match (hv, mv) {
-                            (JsonValue::Null, _) => {}
-                            (_, None) => {
-                                path.push(i.to_string());
-                                remove_patches.push(path.join("/"));
-                                path.pop();
-                                continue;
-                            }
-                            _ => {}
-                        }
-                        JsonValue::Null
-                    } else {
-                        path.push(i.to_string());
-                        let result = copy_unmanaged_fields(
-                            hv,
-                            wv,
-                            mv.unwrap_or(&JsonValue::Null),
-                            path,
-                            remove_patches,
-                        )?;
-                        path.pop();
-                        result
-                    }
+                    copy_unmanaged_fields(hv, wv, mv.unwrap_or(&JsonValue::Null))?
                 } else {
                     w.get(i).unwrap().clone()
                 };
@@ -135,32 +108,7 @@ pub(crate) fn copy_unmanaged_fields(
             let mut copy = Vec::new();
             for i in 0..w.len() {
                 let new_value = if i < h.len() {
-                    match (h.get(i).unwrap(), w.get(i).unwrap()) {
-                        // Are we explicitly setting a value to null? If the previous value here
-                        // *isn't* null then we're probably trying to delete an element we don't own
-                        (hv @ _, JsonValue::Null) => {
-                            if let JsonValue::Null = hv {
-                            } else {
-                                path.push(i.to_string());
-                                remove_patches.push(path.join("/"));
-                                path.pop();
-                                continue;
-                            }
-                            JsonValue::Null
-                        }
-                        (hv, wv) => {
-                            path.push(i.to_string());
-                            let result = copy_unmanaged_fields(
-                                hv,
-                                wv,
-                                &JsonValue::Null,
-                                path,
-                                remove_patches,
-                            )?;
-                            path.pop();
-                            result
-                        }
-                    }
+                    copy_unmanaged_fields(h.get(i).unwrap(), w.get(i).unwrap(), &JsonValue::Null)?
                 } else {
                     w.get(i).unwrap().clone()
                 };
@@ -174,16 +122,18 @@ pub(crate) fn copy_unmanaged_fields(
             let mut copy = serde_json::Map::new();
             let mut remaining = w.clone();
             for (k, v) in h {
-                path.push(k.clone());
-                let new_value = copy_unmanaged_fields(
-                    v,
-                    &remaining.remove(k).unwrap_or(JsonValue::Null),
-                    managed.get(&format!("f:{}", k)).unwrap_or(&JsonValue::Null),
-                    path,
-                    remove_patches,
-                )?;
-                path.pop();
-                copy.insert(k.clone(), new_value);
+                let m = managed.get(&format!("f:{}", k)).unwrap_or(&JsonValue::Null);
+                let new_value =
+                    copy_unmanaged_fields(v, &remaining.remove(k).unwrap_or(JsonValue::Null), m)?;
+                // When we delete labels we cannot set a value to null, so handle keys that we own
+                // and are setting to null carefully. Since we use a JSON patch to do the patch
+                // anyway the key will be deleted.
+                match (new_value, m) {
+                    (JsonValue::Null, JsonValue::Object(_)) => {}
+                    (nv, _) => {
+                        copy.insert(k.clone(), nv);
+                    }
+                }
             }
             for (k, v) in remaining {
                 copy.insert(k.clone(), v.clone());
@@ -196,15 +146,11 @@ pub(crate) fn copy_unmanaged_fields(
             let mut copy = serde_json::Map::new();
             let mut remaining = w.clone();
             for (k, v) in h {
-                path.push(k.clone());
                 let new_value = copy_unmanaged_fields(
                     v,
                     &remaining.remove(k).unwrap_or(JsonValue::Null),
                     &JsonValue::Null,
-                    path,
-                    remove_patches,
                 )?;
-                path.pop();
                 copy.insert(k.clone(), new_value);
             }
             for (k, v) in remaining {
@@ -275,43 +221,21 @@ pub(crate) fn get_kubernetes_api(
 pub(crate) fn make_comparable(
     mut from: KubernetesResources,
     mut to: KubernetesResources,
-) -> Result<(
-    KubernetesResources,
-    KubernetesResources,
-    HashMap<KubernetesKey, Vec<String>>,
-)> {
-    let mut path = vec!["".to_string()];
-    let mut remove_patches = HashMap::new();
+) -> Result<(KubernetesResources, KubernetesResources)> {
     let us = Some(MANAGER.to_string());
     for (key, w) in &mut to.by_key {
-        let mut patches = Vec::new();
-        copy_single_unspecified_data(from.by_key.get_mut(&key), w, &mut path, &mut patches, &us)?;
-        if patches.len() > 0 {
-            remove_patches.insert(key.clone(), patches);
-        }
+        copy_single_unspecified_data(from.by_key.get_mut(&key), w, &us)?;
     }
     for (key, w) in &mut to.namespaces {
-        let mut patches = Vec::new();
-        copy_single_unspecified_data(
-            from.namespaces.get_mut(&key),
-            w,
-            &mut path,
-            &mut patches,
-            &us,
-        )?;
-        if patches.len() > 0 {
-            remove_patches.insert(key.clone(), patches);
-        }
+        copy_single_unspecified_data(from.namespaces.get_mut(&key), w, &us)?;
     }
 
-    Ok((from, to, remove_patches))
+    Ok((from, to))
 }
 
 fn copy_single_unspecified_data(
     have: Option<&mut DynamicObject>,
     want: &mut DynamicObject,
-    path: &mut Vec<String>,
-    remove_patches: &mut Vec<String>,
     us: &Option<String>,
 ) -> Result<()> {
     if let Some(h) = have {
@@ -326,8 +250,6 @@ fn copy_single_unspecified_data(
             &serde_json::to_value(&mut *h)?,
             &serde_json::to_value(&mut *want)?,
             &hm,
-            path,
-            remove_patches,
         )?;
         *want = serde_json::from_value(copied)?;
 
