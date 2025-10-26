@@ -241,6 +241,9 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
 
     let (clients, types) = get_kubernetes_clients([&key]).await?;
     let api = get_kubernetes_api(&key, &clients, &types)?;
+    if let (Some(_), None) = (&key.namespace, api.namespace()) {
+        bail!("Resource type {} is cluster scoped", key.kind);
+    }
     let mut object = api.get(&key.name).await?;
     munge_secrets(None, &mut object)?;
     let as_yaml = serde_yaml::to_string(&object)?;
