@@ -566,7 +566,7 @@ async fn apply_single_diff(
             let result = api
                 .patch(
                     &w.name_any(),
-                    &PatchParams::apply(MANAGER),
+                    &PatchParams::apply(MANAGER).force(),
                     &Patch::Apply(w),
                 )
                 .await
