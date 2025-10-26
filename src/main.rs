@@ -835,6 +835,10 @@ fn load_objects_from_kubernetes_yaml(path: &Path, into: &mut Vec<DynamicObject>)
     let reader = File::open(&path)?;
     for document in serde_yaml::Deserializer::from_reader(&reader) {
         let object: DynamicObject = DynamicObject::deserialize(document)?;
+        if object.types.is_none() && object.metadata == ObjectMeta::default() {
+            // kubectl tolerates these, so we do too
+            continue;
+        }
         into.push(object);
     }
 
@@ -1004,7 +1008,7 @@ async fn render_sisyphus_resource(
                 let types = converted
                     .types
                     .clone()
-                    .ok_or_else(|| anyhow!("Object is type-free"))?;
+                    .ok_or_else(|| anyhow!("Object {} is type-free", converted.name_any()))?;
                 let key = KubernetesKey {
                     api_version: types.api_version,
                     cluster: cluster.clone(),
@@ -1021,7 +1025,7 @@ async fn render_sisyphus_resource(
                     let types = object
                         .types
                         .clone()
-                        .ok_or_else(|| anyhow!("Object is type-free"))?;
+                        .ok_or_else(|| anyhow!("Object {} is type-free", object.name_any()))?;
                     if !allow_any_namespace
                         && types.api_version == "v1"
                         && types.kind == "Namespace"
