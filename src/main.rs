@@ -281,17 +281,27 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         let resources = get_sisyphus_resources_from_files(Path::new(&monitor_directory))?;
         render_sisyphus_resources(
             &resources.global_by_key,
+            /* allow_any_namespace= */ true,
             label_namespace,
             /* maybe_namespace= */ None,
             &mut from_files.by_key,
             &mut registries,
         )
         .await?;
+        from_files.by_key.retain(|k, v| {
+            if k.api_version == "v1" && k.kind == "Namespace" {
+                from_files.namespaces.insert(k.clone(), v.clone());
+                false
+            } else {
+                true
+            }
+        });
         for (namespace, objects) in resources.by_namespace_by_key {
             render_sisyphus_resources(
                 &objects,
+                /* allow_any_namespace= */ false,
                 &label_namespace,
-                Some(&namespace),
+                Some(namespace.to_string()),
                 &mut from_files.by_key,
                 &mut registries,
             )
@@ -326,7 +336,12 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
 
     let from_database = get_objects_from_database(&pool).await?;
     for (k, to) in &mut from_files.by_key {
-        munge_secrets(from_database.by_key.get(&k), to)?;
+        let from = from_database.by_key.get(&k);
+        if let Some(f) = from {
+            to.metadata.resource_version = f.metadata.resource_version.clone();
+            to.metadata.uid = f.metadata.uid.clone();
+        }
+        munge_secrets(from, to)?;
     }
     let (comparable_database, comparable_files) =
         copy_unspecified_data(from_database.clone(), from_files.clone())?;
@@ -474,7 +489,7 @@ async fn apply_single_diff(
             let result = api
                 .patch(
                     &w.name_any(),
-                    &PatchParams::apply(MANAGER),
+                    &PatchParams::apply(MANAGER).force(),
                     &Patch::Apply(w),
                 )
                 .await
@@ -714,15 +729,20 @@ fn get_sisyphus_resources_from_files(directory: &Path) -> Result<SisyphusResourc
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
         if path.is_dir() {
-            let in_namespace = match path.file_name().map(|s| s.to_str()).flatten() {
-                Some("global") => &mut resources.global_by_key,
-                Some(namespace) => resources
-                    .by_namespace_by_key
-                    .entry(namespace.to_string())
-                    .or_insert_with(|| HashMap::new()),
-                None => bail!("Path has no filename"),
-            };
-            get_objects_from_namespace(&path, in_namespace)?;
+            let (resources, allow_any_namespace, namespace) =
+                match path.file_name().map(|s| s.to_str()).flatten() {
+                    Some("global") => (&mut resources.global_by_key, true, None),
+                    Some(namespace) => (
+                        resources
+                            .by_namespace_by_key
+                            .entry(namespace.to_string())
+                            .or_insert_with(|| HashMap::new()),
+                        false,
+                        Some(namespace.to_string()),
+                    ),
+                    None => bail!("Path has no filename"),
+                };
+            get_objects_from_namespace(&path, resources, allow_any_namespace, namespace)?;
         }
     }
     Ok(resources)
@@ -731,8 +751,13 @@ fn get_sisyphus_resources_from_files(directory: &Path) -> Result<SisyphusResourc
 fn get_objects_from_namespace(
     directory: &Path,
     resources: &mut HashMap<SisyphusKey, SisyphusResource>,
+    allow_any_namespace: bool,
+    namespace: Option<String>,
 ) -> Result<()> {
     let index_path = directory.join("index.yaml");
+    if !index_path.exists() {
+        return Ok(());
+    }
     let reader = File::open(&index_path)?;
 
     for document in serde_yaml::Deserializer::from_reader(&reader) {
@@ -743,7 +768,10 @@ fn get_objects_from_namespace(
             let mut extra_objects = Vec::new();
             if let Some(sources) = &mut v.sources {
                 for path in &*sources {
-                    load_objects_from_kubernetes_yaml(&directory.join(path), &mut extra_objects)?;
+                    load_objects_from_kubernetes_yaml(&directory.join(path), &mut extra_objects)
+                        .with_context(|| {
+                            format!("reading file {:?} referenced by {:?}", path, index_path)
+                        })?;
                 }
                 sources.clear();
             }
@@ -751,6 +779,28 @@ fn get_objects_from_namespace(
                 objects.append(&mut extra_objects);
             } else {
                 v.objects = Some(extra_objects);
+            }
+
+            for object in v.objects.iter_mut().flatten() {
+                if let Some(namespace) = object.metadata.namespace.as_ref() {
+                    if !allow_any_namespace {
+                        let types = object
+                            .types
+                            .as_ref()
+                            .map(|t| format!("{}/{}", t.api_version, t.kind))
+                            .unwrap_or_else(|| "unknown".to_string());
+                        bail!(
+                            "{}/{} referenced by {} in {:?} should not specify namespace {:?}",
+                            types,
+                            object.name_any(),
+                            v.metadata.name,
+                            index_path,
+                            namespace
+                        );
+                    }
+                } else {
+                    object.metadata.namespace = namespace.clone();
+                }
             }
         }
         insert_sisyphus_resource(object, resources)?;
@@ -763,18 +813,6 @@ fn load_objects_from_kubernetes_yaml(path: &Path, into: &mut Vec<DynamicObject>)
     let reader = File::open(&path)?;
     for document in serde_yaml::Deserializer::from_reader(&reader) {
         let object: DynamicObject = DynamicObject::deserialize(document)?;
-        let name = object
-            .metadata
-            .name
-            .as_ref()
-            .ok_or_else(|| anyhow!("Object in {:?} is missing a name", path))?;
-        if object.metadata.namespace.is_some() {
-            bail!(
-                "Object {} in {:?} should not specify a namespace",
-                name,
-                path
-            );
-        }
         into.push(object);
     }
 
@@ -803,8 +841,9 @@ fn insert_sisyphus_resource(
 
 async fn render_sisyphus_resources(
     objects: &HashMap<SisyphusKey, SisyphusResource>,
+    allow_any_namespace: bool,
     label_namespace: &str,
-    maybe_namespace: Option<&str>,
+    maybe_namespace: Option<String>,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
     registries: &mut RegistryClients,
 ) -> Result<()> {
@@ -814,26 +853,28 @@ async fn render_sisyphus_resources(
             SisyphusResource::Deployment(v) => {
                 resolve_sisyphus_deployment_image(v, registries).await?;
             }
-            SisyphusResource::KubernetesYaml(v) => {
-                if let Some(objects) = &mut v.objects {
-                    for object in objects {
-                        object.metadata.namespace = maybe_namespace.map(|n| n.to_string());
-                    }
-                }
-            }
+            _ => {}
         };
 
-        render_sisyphus_resource(&copy, label_namespace, &maybe_namespace, by_key, registries)
-            .await
-            .with_context(|| format!("while rendering {:?}", key))?;
+        render_sisyphus_resource(
+            &copy,
+            allow_any_namespace,
+            label_namespace,
+            &maybe_namespace,
+            by_key,
+            registries,
+        )
+        .await
+        .with_context(|| format!("while rendering {:?}", key))?;
     }
     Ok(())
 }
 
 async fn render_sisyphus_resource(
     object: &SisyphusResource,
+    allow_any_namespace: bool,
     label_namespace: &str,
-    maybe_namespace: &Option<&str>,
+    maybe_namespace: &Option<String>,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
     registries: &mut RegistryClients,
 ) -> Result<()> {
@@ -861,9 +902,10 @@ async fn render_sisyphus_resource(
             let mut metadata = ObjectMeta::default();
             metadata.labels = Some(labels.clone());
             metadata.name = Some(v.metadata.name.clone());
-            if let Some(n) = maybe_namespace {
-                metadata.namespace = Some(n.to_string());
-            }
+            let namespace = maybe_namespace
+                .as_ref()
+                .ok_or_else(|| anyhow!("Namespace must be explicit"))?;
+            metadata.namespace = Some(namespace.clone());
 
             let mut independent_spec = DeploymentSpec::default();
             independent_spec.selector.match_labels = Some(labels.clone());
@@ -941,15 +983,12 @@ async fn render_sisyphus_resource(
                     .types
                     .clone()
                     .ok_or_else(|| anyhow!("Object is type-free"))?;
-                if types.api_version == "v1" && types.kind == "Namespace" {
-                    bail!("Cannot specify a namespace");
-                }
                 let key = KubernetesKey {
                     api_version: types.api_version,
                     cluster: cluster.clone(),
                     kind: types.kind,
                     name: v.metadata.name.clone(),
-                    namespace: maybe_namespace.map(|s| s.to_string()),
+                    namespace: Some(namespace.clone()),
                 };
                 by_key.insert(key, converted);
             }
@@ -961,13 +1000,24 @@ async fn render_sisyphus_resource(
                         .types
                         .clone()
                         .ok_or_else(|| anyhow!("Object is type-free"))?;
+                    if !allow_any_namespace
+                        && types.api_version == "v1"
+                        && types.kind == "Namespace"
+                    {
+                        bail!("Cannot specify a namespace");
+                    }
                     for cluster in &v.clusters {
                         let key = KubernetesKey {
                             api_version: types.api_version.clone(),
                             cluster: cluster.clone(),
                             kind: types.kind.clone(),
                             name: object.name_any(),
-                            namespace: maybe_namespace.map(|s| s.to_string()),
+                            namespace: object
+                                .metadata
+                                .namespace
+                                .as_ref()
+                                .or(maybe_namespace.as_ref())
+                                .cloned(),
                         };
                         by_key.insert(key, object.clone());
                     }

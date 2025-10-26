@@ -234,6 +234,8 @@ sisyphus \
 
 # Sharp edges
 
+* The folder named "global" is special: it allows defining cluster-level resources and allows making
+  resources for other namespaces.
 * Sisyphus automatically adopts namespaces and, when all tracked resources are removed, will delete
   them. If you have non-Sisyphus resources then they will be automatically deleted.
 * The secrets support is a bit idiosyncratic. Sisyphus tries to never clobber anything, and never
@@ -250,6 +252,7 @@ sisyphus \
 * [ ] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
 * [ ] `sisyphus run image`: run a config image in an environment and allow specifying the variables
 * [ ] Safe namespace deletions
+* [ ] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse
 * [ ] Resource requests and limits on Sisyphus deployments
 * [ ] Default values for StringVariables so server specs can be overridden when running locally
