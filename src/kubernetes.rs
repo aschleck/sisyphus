@@ -187,12 +187,18 @@ pub(crate) async fn get_kubernetes_clients(
         return Ok((HashMap::new(), HashMap::new()));
     }
 
-    let first = clients.values().next().unwrap().clone();
-    let discovery = Discovery::new(first).run().await?;
+    // We need to fetch types from all clusters because they may have different sets of CRDs
+    let mut futures = Vec::new();
+    for client in clients.values() {
+        let copy = client.clone();
+        futures.push(tokio::spawn(async move { Discovery::new(copy).run().await }));
+    }
     let mut types = HashMap::new();
-    for group in discovery.groups() {
-        for (ar, caps) in group.recommended_resources() {
-            types.insert((ar.api_version.clone(), ar.kind.clone()), (ar, caps));
+    for future in futures {
+        for group in future.await??.groups() {
+            for (ar, caps) in group.recommended_resources() {
+                types.insert((ar.api_version.clone(), ar.kind.clone()), (ar, caps));
+            }
         }
     }
     Ok((clients, types))
