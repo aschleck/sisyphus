@@ -6,8 +6,8 @@ mod sisyphus_yaml;
 use crate::{
     config_image::{Argument, ArgumentValues, get_config},
     kubernetes::{
-        KubernetesKey, KubernetesResources, MANAGER, copy_unspecified_data, get_kubernetes_api,
-        get_kubernetes_clients, munge_secrets,
+        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
+        make_comparable, munge_secrets,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{Deployment as SisyphusDeployment, HasKind, SisyphusResource, VariableSource},
@@ -20,6 +20,7 @@ use docker_registry::{
     render as containerRender,
 };
 use futures::future::try_join_all;
+use json_patch::{PatchOperation, RemoveOperation, jsonptr::PointerBuf};
 use k8s_openapi::api::{
     apps::v1::{Deployment, DeploymentSpec},
     core::v1::{
@@ -343,8 +344,8 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
         munge_secrets(from, to)?;
     }
-    let (comparable_database, comparable_files) =
-        copy_unspecified_data(from_database.clone(), from_files.clone())?;
+    let (comparable_database, comparable_files, remove_patches) =
+        make_comparable(from_database.clone(), from_files.clone())?;
     let changed = generate_diff(&comparable_database, &comparable_files)?;
     if changed.len() == 0 {
         println!("Nothing to do");
@@ -355,7 +356,14 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         return Ok(());
     }
 
-    apply_diff(&changed, &from_database, &from_files, &pool).await?;
+    apply_diff(
+        &changed,
+        &from_database,
+        &from_files,
+        &remove_patches,
+        &pool,
+    )
+    .await?;
     Ok(())
 }
 
@@ -436,6 +444,7 @@ async fn apply_diff(
     changed: &HashSet<&KubernetesKey>,
     have: &KubernetesResources,
     want: &KubernetesResources,
+    remove_patches: &HashMap<KubernetesKey, Vec<String>>,
     pool: &AnyPool,
 ) -> Result<()> {
     let (clients, types) =
@@ -448,6 +457,7 @@ async fn apply_diff(
             &key,
             have.namespaces.get(&key),
             Some(w),
+            remove_patches.get(&key),
             &api,
             pool,
         )
@@ -455,18 +465,45 @@ async fn apply_diff(
     }
     for (key, w) in &want.by_key {
         let api = get_kubernetes_api(key, &clients, &types)?;
-        apply_single_diff(changed, &key, have.by_key.get(&key), Some(w), &api, pool).await?;
+        apply_single_diff(
+            changed,
+            &key,
+            have.by_key.get(&key),
+            Some(w),
+            remove_patches.get(&key),
+            &api,
+            pool,
+        )
+        .await?;
     }
     for (key, h) in &have.by_key {
         if !want.by_key.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(changed, &key, Some(h), None, &api, pool).await?;
+            apply_single_diff(
+                changed,
+                &key,
+                Some(h),
+                None,
+                remove_patches.get(&key),
+                &api,
+                pool,
+            )
+            .await?;
         }
     }
     for (key, h) in &have.namespaces {
         if !want.namespaces.contains_key(&key) {
             let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(changed, &key, Some(h), None, &api, pool).await?;
+            apply_single_diff(
+                changed,
+                &key,
+                Some(h),
+                None,
+                remove_patches.get(&key),
+                &api,
+                pool,
+            )
+            .await?;
         }
     }
     Ok(())
@@ -477,6 +514,7 @@ async fn apply_single_diff(
     key: &KubernetesKey,
     have: Option<&DynamicObject>,
     want: Option<&DynamicObject>,
+    remove_patches: Option<&Vec<String>>,
     api: &kube::Api<DynamicObject>,
     pool: &AnyPool,
 ) -> Result<()> {
@@ -486,11 +524,39 @@ async fn apply_single_diff(
 
     match (have, want) {
         (Some(_), Some(w)) => {
+            let mut editable = w.clone();
+            // This *horrific*, how do I do this better? I can't just calculate the jsonpatch diff
+            // because `have` has a bunch of fields like `status` and `want` has none of them.
+            // Maybe I should be jsonpatching off the result of the compare and not using apply at
+            // all?
+            match remove_patches {
+                None => {}
+                Some(patches) => {
+                    let operations = json_patch::Patch(
+                        patches
+                            .iter()
+                            .map(|p| {
+                                PatchOperation::Remove(RemoveOperation {
+                                    path: PointerBuf::from_str(p).unwrap(),
+                                })
+                            })
+                            .collect(),
+                    );
+                    let after = api
+                        .patch(
+                            &w.name_any(),
+                            &PatchParams::apply(MANAGER),
+                            &Patch::<()>::Json(operations),
+                        )
+                        .await?;
+                    editable.metadata.resource_version = after.metadata.resource_version
+                }
+            };
             let result = api
                 .patch(
                     &w.name_any(),
                     &PatchParams::apply(MANAGER).force(),
-                    &Patch::Apply(w),
+                    &Patch::Apply(editable),
                 )
                 .await
                 .with_context(|| format!("while updating {}", key))?;
