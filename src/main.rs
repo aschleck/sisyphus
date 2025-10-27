@@ -4,17 +4,17 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{get_config, Argument, ArgumentValues},
+    config_image::{Argument, ArgumentValues, get_config},
     kubernetes::{
-        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
-        KubernetesResources, MANAGER,
+        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
+        make_comparable, munge_secrets,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource, VariableSource},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
-use console::{style, Style};
+use console::{Style, style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
@@ -28,16 +28,16 @@ use k8s_openapi::api::{
     },
 };
 use kube::{
+    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
-    Error, ResourceExt,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use similar::{ChangeTag, TextDiff};
 use sqlx::{AnyPool, Row};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fs::{self, File},
     io::Write,
     path::Path,
@@ -349,7 +349,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
     }
     let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
-    let changed = generate_diff(&comparable_database, &comparable_files)?;
+    let changed = generate_diff(comparable_database, comparable_files)?;
     if changed.len() == 0 {
         println!("Nothing to do");
         return Ok(());
@@ -359,7 +359,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         return Ok(());
     }
 
-    apply_diff(&changed, &from_database, &from_files, &pool).await?;
+    apply_diff(changed, &from_database, &from_files, &pool).await?;
     Ok(())
 }
 
@@ -369,7 +369,7 @@ async fn refresh(pool: &AnyPool) -> Result<()> {
     for (k, to) in &mut from_kubernetes.by_key {
         munge_secrets(from_database.by_key.get(k), to)?;
     }
-    let changed = generate_diff(&from_database, &from_kubernetes)?;
+    let changed = generate_diff(from_database, from_kubernetes)?;
     if changed.len() == 0 {
         println!("Nothing to do");
         return Ok(());
@@ -379,7 +379,7 @@ async fn refresh(pool: &AnyPool) -> Result<()> {
         return Ok(());
     }
 
-    apply_refresh(&changed, &from_database, &from_kubernetes, &pool).await?;
+    apply_refresh(changed, &pool).await?;
     Ok(())
 }
 
@@ -396,52 +396,39 @@ struct SisyphusResources {
     global_by_key: HashMap<SisyphusKey, SisyphusResource>,
 }
 
-fn generate_diff<'a>(
-    have: &'a KubernetesResources,
-    want: &'a KubernetesResources,
-) -> Result<HashMap<&'a KubernetesKey, json_patch::Patch>> {
-    let mut changed = HashMap::new();
-    for (key, w) in &want.namespaces {
-        let h = have.namespaces.get(&key);
-        if h == Some(w) {
+fn generate_diff(
+    mut have: KubernetesResources,
+    want: KubernetesResources,
+) -> Result<Vec<(KubernetesKey, DiffAction)>> {
+    let mut changed = Vec::new();
+    let mut after = HashSet::new();
+    for (key, w) in want.namespaces {
+        let h = have.namespaces.remove(&key);
+        if h.as_ref() == Some(&w) {
             continue;
         }
-        generate_single_diff(key, h, Some(w))?;
-        changed.insert(
-            key,
-            json_patch::diff(&serde_json::to_value(h)?, &serde_json::to_value(w)?),
-        );
+        changed.push((key.clone(), generate_single_diff(&key, h, Some(w))?));
+        after.insert(key);
     }
 
-    for (key, w) in &want.by_key {
-        let h = have.by_key.get(&key);
-        if h == Some(w) {
+    for (key, w) in want.by_key {
+        let h = have.by_key.remove(&key);
+        if h.as_ref() == Some(&w) {
             continue;
         }
-        generate_single_diff(key, h, Some(w))?;
-        changed.insert(
-            key,
-            json_patch::diff(&serde_json::to_value(h)?, &serde_json::to_value(w)?),
-        );
+        changed.push((key.clone(), generate_single_diff(&key, h, Some(w))?));
+        after.insert(key);
     }
 
-    for (key, h) in &have.by_key {
-        if !want.by_key.contains_key(&key) {
-            generate_single_diff(key, Some(h), None)?;
-            changed.insert(
-                key,
-                json_patch::diff(&serde_json::to_value(h)?, &JsonValue::Null),
-            );
+    for (key, h) in have.by_key {
+        if !after.contains(&key) {
+            changed.push((key.clone(), generate_single_diff(&key, Some(h), None)?));
         }
     }
 
-    for (key, h) in &have.namespaces {
-        if !want.namespaces.contains_key(&key) {
-            generate_single_diff(key, Some(h), None)?;
-            changed.insert(
-                key,
-                json_patch::diff(&serde_json::to_value(h)?, &JsonValue::Null),
-            );
+    for (key, h) in have.namespaces {
+        if !after.contains(&key) {
+            changed.push((key.clone(), generate_single_diff(&key, Some(h), None)?));
         }
     }
 
@@ -449,70 +436,82 @@ fn generate_diff<'a>(
 }
 
 async fn apply_diff(
-    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
+    changed: Vec<(KubernetesKey, DiffAction)>,
     have: &KubernetesResources,
     want: &KubernetesResources,
     pool: &AnyPool,
 ) -> Result<()> {
     let (clients, types) =
         get_kubernetes_clients(have.by_key.keys().chain(want.by_key.keys())).await?;
-
-    for (key, w) in &want.namespaces {
-        let api = get_kubernetes_api(key, &clients, &types)?;
-        apply_single_diff(
-            changed.get(key),
-            &key,
-            have.namespaces.get(&key),
-            Some(w),
-            &api,
-            pool,
-        )
-        .await?;
-    }
-    for (key, w) in &want.by_key {
-        let api = get_kubernetes_api(key, &clients, &types)?;
-        apply_single_diff(
-            changed.get(key),
-            &key,
-            have.by_key.get(&key),
-            Some(w),
-            &api,
-            pool,
-        )
-        .await?;
-    }
-    for (key, h) in &have.by_key {
-        if !want.by_key.contains_key(&key) {
-            let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(changed.get(key), &key, Some(h), None, &api, pool).await?;
-        }
-    }
-    for (key, h) in &have.namespaces {
-        if !want.namespaces.contains_key(&key) {
-            let api = get_kubernetes_api(key, &clients, &types)?;
-            apply_single_diff(changed.get(key), &key, Some(h), None, &api, pool).await?;
-        }
+    for (key, action) in changed {
+        let api = get_kubernetes_api(&key, &clients, &types)?;
+        apply_single_diff(action, &key, &api, pool).await?;
     }
     Ok(())
 }
 
 async fn apply_single_diff(
-    changed: Option<&json_patch::Patch>,
+    action: DiffAction,
     key: &KubernetesKey,
-    have: Option<&DynamicObject>,
-    want: Option<&DynamicObject>,
     api: &kube::Api<DynamicObject>,
     pool: &AnyPool,
 ) -> Result<()> {
-    let Some(patch) = changed else { return Ok(()) };
-
-    match (have, want) {
-        (Some(_), Some(w)) => {
+    match action {
+        DiffAction::Create(v) => {
             let result = api
                 .patch(
-                    &w.name_any(),
+                    &key.name,
+                    &PatchParams::apply(MANAGER).force(),
+                    &Patch::Apply(v),
+                )
+                .await
+                .with_context(|| format!("while creating {}", key))?;
+            sqlx::query(
+                r#"
+                INSERT INTO kubernetes_objects (api_version, cluster, kind, name, namespace, yaml)
+                VALUES ($1, $2, $3, $4, $5, $6)
+                "#,
+            )
+            .bind(key.api_version.clone())
+            .bind(key.cluster.clone())
+            .bind(key.kind.clone())
+            .bind(key.name.clone())
+            .bind(namespace_or_default(key.namespace.clone()))
+            .bind(serde_yaml::to_string(&result)?)
+            .execute(pool)
+            .await?;
+            println!("Created {}", key);
+        }
+        DiffAction::Delete => {
+            api.delete(&key.name, &DeleteParams::default())
+                .await
+                .with_context(|| format!("while deleting {}", key))?;
+            sqlx::query(
+                r#"
+                DELETE FROM kubernetes_objects
+                WHERE
+                    api_version = $1
+                    AND cluster = $2
+                    AND kind = $3
+                    AND name = $4
+                    AND namespace = $5
+                "#,
+            )
+            .bind(key.api_version.clone())
+            .bind(key.cluster.clone())
+            .bind(key.kind.clone())
+            .bind(key.name.clone())
+            .bind(namespace_or_default(key.namespace.clone()))
+            .execute(pool)
+            .await?;
+            println!("Deleted {}", key);
+        }
+        DiffAction::Patch { patch, .. } => {
+            let result = api
+                .patch(
+                    &key.name,
                     &PatchParams::apply(MANAGER),
-                    &Patch::<()>::Json(patch.clone()),
+                    &Patch::<()>::Json(patch),
                 )
                 .await
                 .with_context(|| format!("while updating {}", key))?;
@@ -538,96 +537,56 @@ async fn apply_single_diff(
             .await?;
             println!("Updated {}", key);
         }
-        (Some(h), None) => {
-            api.delete(&h.name_any(), &DeleteParams::default())
+        DiffAction::Recreate(v) => {
+            api.delete(&key.name, &DeleteParams::default())
                 .await
-                .with_context(|| format!("while deleting {}", key))?;
-            sqlx::query(
-                r#"
-                DELETE FROM kubernetes_objects
-                WHERE
-                    api_version = $1
-                    AND cluster = $2
-                    AND kind = $3
-                    AND name = $4
-                    AND namespace = $5
-                "#,
-            )
-            .bind(key.api_version.clone())
-            .bind(key.cluster.clone())
-            .bind(key.kind.clone())
-            .bind(key.name.clone())
-            .bind(namespace_or_default(key.namespace.clone()))
-            .execute(pool)
-            .await?;
-            println!("Deleted {}", key);
-        }
-        (None, Some(w)) => {
+                .with_context(|| format!("while replacing {}", key))?;
+            println!("Deleting prior to recreate {}", key);
             let result = api
                 .patch(
-                    &w.name_any(),
+                    &key.name,
                     &PatchParams::apply(MANAGER).force(),
-                    &Patch::Apply(w),
+                    &Patch::Apply(v),
                 )
                 .await
-                .with_context(|| format!("while creating {}", key))?;
+                .with_context(|| format!("while replacing {}", key))?;
             sqlx::query(
                 r#"
-                INSERT INTO kubernetes_objects (api_version, cluster, kind, name, namespace, yaml)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                UPDATE kubernetes_objects
+                SET last_updated = CURRENT_TIMESTAMP, yaml = $1
+                WHERE
+                    api_version = $2
+                    AND cluster = $3
+                    AND kind = $4
+                    AND name = $5
+                    AND namespace = $6
                 "#,
             )
+            .bind(serde_yaml::to_string(&result)?)
             .bind(key.api_version.clone())
             .bind(key.cluster.clone())
             .bind(key.kind.clone())
             .bind(key.name.clone())
             .bind(namespace_or_default(key.namespace.clone()))
-            .bind(serde_yaml::to_string(&result)?)
             .execute(pool)
             .await?;
-            println!("Created {}", key);
+            println!("Recreated {}", key);
         }
-        (None, None) => bail!("Expected some type of object"),
     }
     Ok(())
 }
 
-async fn apply_refresh(
-    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
-    from_database: &KubernetesResources,
-    from_kubernetes: &KubernetesResources,
-    pool: &AnyPool,
-) -> Result<()> {
-    refresh_group(
-        &changed,
-        &from_database.by_key,
-        &from_kubernetes.by_key,
-        &pool,
-    )
-    .await?;
-    refresh_group(
-        &changed,
-        &from_database.namespaces,
-        &from_kubernetes.namespaces,
-        &pool,
-    )
-    .await?;
+async fn apply_refresh(changed: Vec<(KubernetesKey, DiffAction)>, pool: &AnyPool) -> Result<()> {
+    refresh_group(changed, &pool).await?;
     Ok(())
 }
 
-async fn refresh_group(
-    changed: &HashMap<&KubernetesKey, json_patch::Patch>,
-    have: &BTreeMap<KubernetesKey, DynamicObject>,
-    want: &BTreeMap<KubernetesKey, DynamicObject>,
-    pool: &AnyPool,
-) -> Result<()> {
-    for key in have.keys() {
-        if !changed.contains_key(key) {
-            continue;
-        }
-
-        match want.get(key) {
-            Some(w) => {
+async fn refresh_group(changed: Vec<(KubernetesKey, DiffAction)>, pool: &AnyPool) -> Result<()> {
+    for (key, action) in changed {
+        match action {
+            DiffAction::Create(w)
+            | DiffAction::Patch { after: w, .. }
+            | DiffAction::Recreate(w) => {
                 sqlx::query(
                     r#"
                     UPDATE kubernetes_objects
@@ -650,7 +609,7 @@ async fn refresh_group(
                 .await?;
                 println!("Updated {}", key);
             }
-            None => {
+            DiffAction::Delete => {
                 sqlx::query(
                     r#"
                     DELETE FROM kubernetes_objects
@@ -1176,35 +1135,92 @@ async fn resolve_sisyphus_deployment_image(
     Ok(())
 }
 
-fn generate_single_diff<T: serde::Serialize>(
+enum DiffAction {
+    Delete,
+    Create(DynamicObject),
+    Recreate(DynamicObject),
+    Patch {
+        after: DynamicObject,
+        patch: json_patch::Patch,
+    },
+}
+
+fn generate_single_diff<'a>(
     key: &KubernetesKey,
-    have: Option<&T>,
-    want: Option<&T>,
-) -> Result<()> {
-    let (verb, hs, ws) = match (have, want) {
-        (Some(h), Some(w)) => (
-            style("patch").yellow(),
-            serde_yaml::to_string(h)?,
-            serde_yaml::to_string(w)?,
-        ),
-        (Some(h), None) => (
-            style("delete").red(),
-            serde_yaml::to_string(h)?,
-            "".to_string(),
-        ),
-        (None, Some(w)) => (
-            style("create").green(),
-            "".to_string(),
-            serde_yaml::to_string(w)?,
-        ),
+    have: Option<DynamicObject>,
+    want: Option<DynamicObject>,
+) -> Result<DiffAction> {
+    let hs = if let Some(h) = &have {
+        serde_yaml::to_string(&h)?
+    } else {
+        "".to_string()
+    };
+    let ws = if let Some(w) = &want {
+        serde_yaml::to_string(&w)?
+    } else {
+        "".to_string()
+    };
+    let action = match (have, want) {
+        (Some(h), Some(mut w)) => {
+            let patch = json_patch::diff(&serde_json::to_value(&h)?, &serde_json::to_value(&w)?);
+            let types = w.types.as_ref().ok_or_else(|| anyhow!("Expected types"))?;
+            let action = match (types.api_version.as_str(), types.kind.as_str()) {
+                ("apps/v1", "Deployment") => {
+                    let mut recreate = false;
+                    for modification in &patch.0 {
+                        match modification {
+                            json_patch::PatchOperation::Add(o) => {
+                                let path = o.path.to_string();
+                                if path.starts_with("/spec/selector/") {
+                                    recreate = true;
+                                }
+                            }
+                            json_patch::PatchOperation::Remove(o) => {
+                                let path = o.path.to_string();
+                                if path.starts_with("/spec/selector/") {
+                                    recreate = true;
+                                }
+                            }
+                            json_patch::PatchOperation::Replace(o) => {
+                                let path = o.path.to_string();
+                                if path.starts_with("/spec/selector/") {
+                                    recreate = true;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    match recreate {
+                        true => {
+                            w.metadata.resource_version = None;
+                            w.metadata.uid = None;
+                            DiffAction::Recreate(w)
+                        }
+                        false => DiffAction::Patch { after: w, patch },
+                    }
+                }
+                _ => DiffAction::Patch { after: w, patch },
+            };
+
+            action
+        }
+        (Some(_), None) => DiffAction::Delete,
+        (None, Some(w)) => DiffAction::Create(w),
         (None, None) => bail!("Expected a difference"),
+    };
+
+    let verb = match &action {
+        DiffAction::Create(_) => style("create").green(),
+        DiffAction::Delete => style("delete").red(),
+        DiffAction::Patch { .. } => style("patch").yellow(),
+        DiffAction::Recreate(_) => style("delete and recreate").red(),
     };
 
     let diff = TextDiff::from_lines(&hs, &ws);
     println!("• {} {}\n", verb, key);
     print_diff(&diff);
     println!("");
-    Ok(())
+    Ok(action)
 }
 
 fn ask_for_user_permission(verb: &str) -> Result<bool> {

@@ -1,9 +1,9 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use kube::{
+    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
-    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -53,7 +53,7 @@ fn copy_unmanaged_fields(
     want: &JsonValue,
     managed: &JsonValue,
 ) -> Result<JsonValue> {
-    match (have, want, managed) {
+    Ok(match (have, want, managed) {
         (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Object(m)) => {
             // Try to find the matching rules for every key
             let mut selectors = Vec::new();
@@ -101,7 +101,7 @@ fn copy_unmanaged_fields(
                 };
                 copy.push(new_value);
             }
-            Ok(JsonValue::Array(copy))
+            JsonValue::Array(copy)
         }
         (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Null) => {
             // If we don't already own anything, merge the keys half-heartedly
@@ -114,31 +114,31 @@ fn copy_unmanaged_fields(
                 };
                 copy.push(new_value);
             }
-            Ok(JsonValue::Array(copy))
+            JsonValue::Array(copy)
         }
         (JsonValue::Object(h), JsonValue::Object(w), JsonValue::Object(managed)) => {
-            // When we are adding keys but don't own anything currently, merge all the existing
-            // keys according to our merge instructions and then plop our remaining ones on top
+            // Check if we think we own everything
+            if managed.len() == 0 {
+                let mut copy = serde_json::Map::new();
+                for (k, v) in w {
+                    copy.insert(k.clone(), v.clone());
+                }
+                return Ok(JsonValue::Object(copy));
+            }
+
+            // Merge all the existing keys and plop ours on top
             let mut copy = serde_json::Map::new();
             let mut remaining = w.clone();
             for (k, v) in h {
                 let m = managed.get(&format!("f:{}", k)).unwrap_or(&JsonValue::Null);
                 let new_value =
                     copy_unmanaged_fields(v, &remaining.remove(k).unwrap_or(JsonValue::Null), m)?;
-                // When we delete labels we cannot set a value to null, so handle keys that we own
-                // and are setting to null carefully. Since we use a JSON patch to do the patch
-                // anyway the key will be deleted.
-                match (new_value, m) {
-                    (JsonValue::Null, JsonValue::Object(_)) => {}
-                    (nv, _) => {
-                        copy.insert(k.clone(), nv);
-                    }
-                }
+                copy.insert(k.clone(), new_value);
             }
             for (k, v) in remaining {
                 copy.insert(k.clone(), v.clone());
             }
-            Ok(JsonValue::Object(copy))
+            JsonValue::Object(copy)
         }
         (JsonValue::Object(h), JsonValue::Object(w), JsonValue::Null) => {
             // When we are adding keys but don't own anything currently, merge all the existing
@@ -156,15 +156,15 @@ fn copy_unmanaged_fields(
             for (k, v) in remaining {
                 copy.insert(k, v);
             }
-            Ok(JsonValue::Object(copy))
+            JsonValue::Object(copy)
         }
         // If something is already a string, and we put a number, convert it to a string so it
         // doesn't generate a diff
-        (JsonValue::String(_), JsonValue::Number(n), _) => Ok(JsonValue::String(n.to_string())),
-        (_, JsonValue::Null, JsonValue::Object(_)) => Ok(want.clone()),
-        (_, JsonValue::Null, JsonValue::Null) => Ok(have.clone()),
-        _ => Ok(want.clone()),
-    }
+        (JsonValue::String(_), JsonValue::Number(n), _) => JsonValue::String(n.to_string()),
+        (_, JsonValue::Null, JsonValue::Object(_)) => want.clone(),
+        (_, JsonValue::Null, JsonValue::Null) => have.clone(),
+        _ => want.clone(),
+    })
 }
 
 pub(crate) async fn get_kubernetes_clients(
