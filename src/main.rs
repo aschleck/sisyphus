@@ -939,8 +939,12 @@ async fn render_sisyphus_resource(
             let mut labels = v.metadata.labels.clone();
             labels.insert(format!("{}/app", label_namespace), v.metadata.name.clone());
             let mut metadata = ObjectMeta::default();
-            metadata.annotations = Some(v.metadata.annotations.clone());
-            metadata.labels = Some(labels.clone());
+            if v.metadata.annotations.len() > 0 {
+                metadata.annotations = Some(v.metadata.annotations.clone());
+            }
+            if labels.len() > 0 {
+                metadata.labels = Some(labels.clone());
+            }
             metadata.name = Some(v.metadata.name.clone());
             let namespace = maybe_namespace
                 .as_ref()
