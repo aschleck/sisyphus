@@ -55,7 +55,7 @@ fn copy_unmanaged_fields(
 ) -> Result<JsonValue> {
     Ok(match (have, want, managed) {
         (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Object(m)) => {
-            // Try to find the matching rules for every key
+            // Parse all the selectors
             let mut selectors = Vec::new();
             for (k, v) in m {
                 let Some((t, s)) = k.split_once(":") else {
@@ -71,33 +71,65 @@ fn copy_unmanaged_fields(
                 });
             }
 
+            // Try to find the matching rules for every key
             let mut copy = Vec::new();
+            let mut unused = h.clone();
             for i in 0..w.len() {
-                let new_value = if i < h.len() {
-                    let hv = h.get(i).unwrap();
-                    let wv = w.get(i).unwrap();
-                    let mv = selectors.iter_mut().find_map(|selector| {
-                        if selector.used {
-                            return None;
+                let wv = w.get(i).unwrap();
+                // What managed fields applies to this specific value?
+                let mv = selectors.iter_mut().find_map(|selector| {
+                    if selector.used {
+                        return None;
+                    }
+                    let mut matches = true;
+                    for (k, v) in &selector.matcher {
+                        if wv.get(k) != Some(v) {
+                            matches = false;
+                            break;
                         }
-                        let mut matches = true;
-                        for (k, v) in &selector.matcher {
-                            if wv.get(k) != Some(v) {
-                                matches = false;
+                    }
+
+                    if matches {
+                        selector.used = true;
+                        return Some(selector);
+                    } else {
+                        return None;
+                    }
+                });
+
+                // What is the old version of the field?
+                let hv = match mv {
+                    Some(ref mvv) => {
+                        let mut found = None;
+                        for j in 0..unused.len() {
+                            let matches = {
+                                let hv = &unused[j];
+                                let mut matches = true;
+                                for (k, v) in &mvv.matcher {
+                                    if hv.get(k) != Some(&v) {
+                                        matches = false;
+                                        break;
+                                    }
+                                }
+                                matches
+                            };
+                            if matches {
+                                found = Some(unused.remove(j));
                                 break;
                             }
                         }
+                        found
+                    },
+                    None => Some(unused.remove(0)),
+                };
 
-                        if matches {
-                            selector.used = true;
-                            return Some(selector.data);
-                        } else {
-                            return None;
-                        }
-                    });
-                    copy_unmanaged_fields(hv, wv, mv.unwrap_or(&JsonValue::Null))?
-                } else {
-                    w.get(i).unwrap().clone()
+                let new_value = match hv {
+                    Some(hvv) =>
+                        copy_unmanaged_fields(
+                            &hvv,
+                            wv,
+                            mv.map(|v| v.data).unwrap_or(&JsonValue::Null))?,
+                    None => wv.clone(),
                 };
                 copy.push(new_value);
             }

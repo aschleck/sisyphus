@@ -262,6 +262,18 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
         return Ok(());
     }
 
+    object.metadata.managed_fields = None;
+    let (clients, types) = get_kubernetes_clients([&key]).await?;
+    let api = get_kubernetes_api(&key, &clients, &types)?;
+    let result = api
+        .patch(
+            &key.name,
+            &PatchParams::apply(MANAGER).force(),
+            &Patch::Apply(object),
+        )
+        .await
+        .with_context(|| format!("while imporing {}", key))?;
+
     sqlx::query(
         r#"
         INSERT INTO kubernetes_objects (api_version, cluster, kind, name, namespace, yaml)
@@ -273,7 +285,7 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
     .bind(key.kind.clone())
     .bind(key.name.clone())
     .bind(namespace_or_default(key.namespace.clone()))
-    .bind(as_yaml)
+    .bind(serde_yaml::to_string(&result)?)
     .execute(pool)
     .await?;
     println!("Imported {}", key);
