@@ -250,10 +250,9 @@ fn copy_single_unspecified_data(
         let hm = h
             .managed_fields()
             .iter()
-            .find(|m| m.manager == *us)
-            .map(|m| m.fields_v1.as_ref().map(|m| m.0.clone()))
-            .flatten()
-            .unwrap_or(JsonValue::Null);
+            .filter(|m| m.manager == *us)
+            .filter_map(|m| m.fields_v1.as_ref())
+            .fold(JsonValue::Null, |mut a, b| { json_patch::merge(&mut a, &b.0); a });
         let copied = copy_unmanaged_fields(
             &serde_json::to_value(&mut *h)?,
             &serde_json::to_value(&mut *want)?,
