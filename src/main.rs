@@ -20,6 +20,7 @@ use docker_registry::{
     render as containerRender,
 };
 use futures::future::try_join_all;
+use indicatif::{ProgressBar, ProgressStyle};
 use json_patch::jsonptr::{Assign, Pointer};
 use k8s_openapi::{
     api::{
@@ -689,6 +690,9 @@ async fn get_objects_from_kubernetes(
             .chain(from_database.namespaces.keys()),
     )
     .await?;
+    let bar =
+        ProgressBar::new((from_database.by_key.len() + from_database.namespaces.len()) as u64)
+            .with_style(ProgressStyle::with_template("Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}")?);
     for (source, destination) in [
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),
@@ -702,8 +706,10 @@ async fn get_objects_from_kubernetes(
                 Err(Error::Api(ErrorResponse { code: 404, .. })) => { /* deletions are fine */ }
                 Err(e) => bail!("Unable to fetch item, caused by: {:?}", e),
             };
+            bar.inc(1);
         }
     }
+    bar.finish();
     Ok(resources)
 }
 
