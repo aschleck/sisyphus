@@ -1,0 +1,25 @@
+apiVersion: sisyphus/v1
+kind: KubernetesYaml
+metadata:
+  name: ingress
+objects:
+  - apiVersion: networking.k8s.io/v1
+    kind: Ingress
+    metadata:
+      name: echo
+    spec:
+      ingressClassName: echo
+      rules:
+      - http:
+          paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: echo
+                port:
+                  name: http
+clusters:
+  - gke_acme_us-central1_ap-us-central1
+  - gke_acme_us-west4_ap-us-west4
+

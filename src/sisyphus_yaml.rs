@@ -5,8 +5,9 @@ use std::collections::BTreeMap;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind")]
 pub enum SisyphusResource {
-    Deployment(Deployment),
     KubernetesYaml(KubernetesYaml),
+    SisyphusDeployment(SisyphusDeployment),
+    SisyphusYaml(SisyphusYaml),
 }
 
 pub trait HasKind {
@@ -15,16 +16,16 @@ pub trait HasKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct Deployment {
+pub struct SisyphusDeployment {
     pub api_version: String,
     pub metadata: Metadata,
     pub config: DeploymentConfig,
     pub footprint: BTreeMap<String, FootprintEntry>,
 }
 
-impl HasKind for Deployment {
+impl HasKind for SisyphusDeployment {
     fn kind(&self) -> &'static str {
-        "Deployment"
+        "SisyphusDeployment"
     }
 }
 
@@ -34,8 +35,10 @@ pub struct KubernetesYaml {
     pub api_version: String,
     pub metadata: Metadata,
     pub clusters: Vec<String>,
-    pub objects: Option<Vec<DynamicObject>>,
-    pub sources: Option<Vec<String>>,
+    #[serde(default)]
+    pub objects: Vec<DynamicObject>,
+    #[serde(default)]
+    pub sources: Vec<String>,
 }
 
 impl HasKind for KubernetesYaml {
@@ -46,10 +49,27 @@ impl HasKind for KubernetesYaml {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SisyphusYaml {
+    pub api_version: String,
+    pub metadata: Metadata,
+    #[serde(default)]
+    pub sources: Vec<String>,
+}
+
+impl HasKind for SisyphusYaml {
+    fn kind(&self) -> &'static str {
+        "SisyphusYaml"
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct Metadata {
-    pub annotations: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub annotations: BTreeMap<String, String>,
     pub name: String,
-    pub labels: Option<BTreeMap<String, String>>,
+    #[serde(default)]
+    pub labels: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

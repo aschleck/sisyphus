@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use kube::{
-    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
+    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -191,7 +191,9 @@ pub(crate) async fn get_kubernetes_clients(
     let mut futures = Vec::new();
     for client in clients.values() {
         let copy = client.clone();
-        futures.push(tokio::spawn(async move { Discovery::new(copy).run().await }));
+        futures.push(tokio::spawn(
+            async move { Discovery::new(copy).run().await },
+        ));
     }
     let mut types = HashMap::new();
     for future in futures {

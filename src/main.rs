@@ -4,17 +4,17 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{Argument, ArgumentValues, get_config},
+    config_image::{get_config, Argument, ArgumentValues},
     kubernetes::{
-        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
-        make_comparable, munge_secrets,
+        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
+        KubernetesResources, MANAGER,
     },
     registry_clients::RegistryClients,
-    sisyphus_yaml::{Deployment as SisyphusDeployment, HasKind, SisyphusResource, VariableSource},
+    sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource, VariableSource},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Parser, Subcommand};
-use console::{Style, style};
+use console::{style, Style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
@@ -28,9 +28,9 @@ use k8s_openapi::api::{
     },
 };
 use kube::{
-    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
+    Error, ResourceExt,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -764,7 +764,7 @@ fn get_sisyphus_resources_from_files(directory: &Path) -> Result<SisyphusResourc
                     ),
                     None => bail!("Path has no filename"),
                 };
-            get_objects_from_namespace(&path, resources, allow_any_namespace, namespace)?;
+            get_objects_from_namespace(&path, resources, allow_any_namespace, &namespace)?;
         }
     }
     Ok(resources)
@@ -774,36 +774,41 @@ fn get_objects_from_namespace(
     directory: &Path,
     resources: &mut HashMap<SisyphusKey, SisyphusResource>,
     allow_any_namespace: bool,
-    namespace: Option<String>,
+    namespace: &Option<String>,
 ) -> Result<()> {
     let index_path = directory.join("index.yaml");
     if !index_path.exists() {
         return Ok(());
     }
-    let reader = File::open(&index_path)?;
+    get_objects_from_file(&index_path, resources, allow_any_namespace, &namespace)
+}
 
+fn get_objects_from_file(
+    path: &Path,
+    resources: &mut HashMap<SisyphusKey, SisyphusResource>,
+    allow_any_namespace: bool,
+    namespace: &Option<String>,
+) -> Result<()> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| anyhow!("Expected to be in a child folder"))?;
+    let reader = File::open(&path)?;
     for document in serde_yaml::Deserializer::from_reader(&reader) {
         let mut object: SisyphusResource = SisyphusResource::deserialize(document)
-            .with_context(|| format!("in file {:?}", index_path))?;
+            .with_context(|| format!("in file {:?}", path))?;
 
         if let SisyphusResource::KubernetesYaml(v) = &mut object {
             let mut extra_objects = Vec::new();
-            if let Some(sources) = &mut v.sources {
-                for path in &*sources {
-                    load_objects_from_kubernetes_yaml(&directory.join(path), &mut extra_objects)
-                        .with_context(|| {
-                            format!("reading file {:?} referenced by {:?}", path, index_path)
-                        })?;
-                }
-                sources.clear();
+            for source_path in &v.sources {
+                load_objects_from_kubernetes_yaml(&directory.join(source_path), &mut extra_objects)
+                    .with_context(|| {
+                        format!("reading file {:?} referenced by {:?}", source_path, path)
+                    })?;
             }
-            if let Some(objects) = &mut v.objects {
-                objects.append(&mut extra_objects);
-            } else {
-                v.objects = Some(extra_objects);
-            }
+            v.sources.clear();
+            v.objects.append(&mut extra_objects);
 
-            for object in v.objects.iter_mut().flatten() {
+            for object in &mut v.objects {
                 if let Some(namespace) = object.metadata.namespace.as_ref() {
                     if !allow_any_namespace {
                         let types = object
@@ -816,7 +821,7 @@ fn get_objects_from_namespace(
                             types,
                             object.name_any(),
                             v.metadata.name,
-                            index_path,
+                            path,
                             namespace
                         );
                     }
@@ -824,8 +829,19 @@ fn get_objects_from_namespace(
                     object.metadata.namespace = namespace.clone();
                 }
             }
+            insert_sisyphus_resource(object, resources)?;
+        } else if let SisyphusResource::SisyphusYaml(v) = &mut object {
+            for source_path in &v.sources {
+                get_objects_from_file(
+                    &directory.join(source_path),
+                    resources,
+                    allow_any_namespace,
+                    namespace,
+                )?;
+            }
+        } else {
+            insert_sisyphus_resource(object, resources)?;
         }
-        insert_sisyphus_resource(object, resources)?;
     }
 
     Ok(())
@@ -850,8 +866,9 @@ fn insert_sisyphus_resource(
     resources: &mut HashMap<SisyphusKey, SisyphusResource>,
 ) -> Result<()> {
     let (api_version, kind, name) = match &object {
-        SisyphusResource::Deployment(v) => (&v.api_version, v.kind(), &v.metadata.name),
         SisyphusResource::KubernetesYaml(v) => (&v.api_version, v.kind(), &v.metadata.name),
+        SisyphusResource::SisyphusDeployment(v) => (&v.api_version, v.kind(), &v.metadata.name),
+        SisyphusResource::SisyphusYaml(_) => unreachable!("These should already have been loaded"),
     };
     let key = SisyphusKey {
         api_version: api_version.clone(),
@@ -876,7 +893,7 @@ async fn render_sisyphus_resources(
     for (key, object) in objects {
         let mut copy = object.clone();
         match &mut copy {
-            SisyphusResource::Deployment(v) => {
+            SisyphusResource::SisyphusDeployment(v) => {
                 resolve_sisyphus_deployment_image(v, registries).await?;
             }
             _ => {}
@@ -905,10 +922,36 @@ async fn render_sisyphus_resource(
     registries: &mut RegistryClients,
 ) -> Result<()> {
     match object {
-        SisyphusResource::Deployment(v) => {
+        SisyphusResource::KubernetesYaml(v) => {
+            for object in &v.objects {
+                let types = object
+                    .types
+                    .clone()
+                    .ok_or_else(|| anyhow!("Object {} is type-free", object.name_any()))?;
+                if !allow_any_namespace && types.api_version == "v1" && types.kind == "Namespace" {
+                    bail!("Cannot specify a namespace");
+                }
+                for cluster in &v.clusters {
+                    let key = KubernetesKey {
+                        api_version: types.api_version.clone(),
+                        cluster: cluster.clone(),
+                        kind: types.kind.clone(),
+                        name: object.name_any(),
+                        namespace: object
+                            .metadata
+                            .namespace
+                            .as_ref()
+                            .or(maybe_namespace.as_ref())
+                            .cloned(),
+                    };
+                    by_key.insert(key, object.clone());
+                }
+            }
+        }
+        SisyphusResource::SisyphusDeployment(v) => {
             let image = RegistryReference::from_str(&v.config.image)
                 .map_err(|e| anyhow!("Unable to parse image url: {}", e))?;
-            let registry = registries.get_client(image.registry())?;
+            let registry = registries.get_client(&image.registry()).await?;
             let repository = image.repository();
             let manifest = registry
                 .get_manifest(&repository, image.version().as_ref())
@@ -923,9 +966,10 @@ async fn render_sisyphus_resource(
             containerRender::unpack(&blobs, path.path())?;
             let (index, application) = get_config(path.path()).await?;
 
-            let mut labels = v.metadata.labels.clone().unwrap_or_else(|| BTreeMap::new());
+            let mut labels = v.metadata.labels.clone();
             labels.insert(format!("{}/app", label_namespace), v.metadata.name.clone());
             let mut metadata = ObjectMeta::default();
+            metadata.annotations = Some(v.metadata.annotations.clone());
             metadata.labels = Some(labels.clone());
             metadata.name = Some(v.metadata.name.clone());
             let namespace = maybe_namespace
@@ -1019,36 +1063,8 @@ async fn render_sisyphus_resource(
                 by_key.insert(key, converted);
             }
         }
-        SisyphusResource::KubernetesYaml(v) => {
-            if let Some(objects) = &v.objects {
-                for object in objects {
-                    let types = object
-                        .types
-                        .clone()
-                        .ok_or_else(|| anyhow!("Object {} is type-free", object.name_any()))?;
-                    if !allow_any_namespace
-                        && types.api_version == "v1"
-                        && types.kind == "Namespace"
-                    {
-                        bail!("Cannot specify a namespace");
-                    }
-                    for cluster in &v.clusters {
-                        let key = KubernetesKey {
-                            api_version: types.api_version.clone(),
-                            cluster: cluster.clone(),
-                            kind: types.kind.clone(),
-                            name: object.name_any(),
-                            namespace: object
-                                .metadata
-                                .namespace
-                                .as_ref()
-                                .or(maybe_namespace.as_ref())
-                                .cloned(),
-                        };
-                        by_key.insert(key, object.clone());
-                    }
-                }
-            }
+        SisyphusResource::SisyphusYaml(_) => {
+            unreachable!("These should already have been resolved")
         }
     };
     Ok(())
@@ -1143,10 +1159,11 @@ async fn resolve_sisyphus_deployment_image(
 ) -> Result<()> {
     let image = RegistryReference::from_str(&object.config.image)
         .map_err(|e| anyhow!("Unable to parse image url: {}", e))?;
-    let registry = registries.get_client(image.registry())?;
+    let registry = registries.get_client(&image.registry()).await?;
     let manifest = registry
         .get_manifest(image.repository().as_ref(), image.version().as_ref())
-        .await?;
+        .await
+        .with_context(|| format!("while resolving {}", object.config.image))?;
     let digests = manifest.layers_digests(None)?;
     object.config.image = RegistryReference::new(
         Some(image.registry()),
