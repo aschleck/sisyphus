@@ -20,12 +20,17 @@ use docker_registry::{
     render as containerRender,
 };
 use futures::future::try_join_all;
-use k8s_openapi::api::{
-    apps::v1::{Deployment, DeploymentSpec},
-    core::v1::{
-        Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, Namespace, PodSpec,
-        SecretKeySelector, SecretVolumeSource, Volume, VolumeMount,
+use json_patch::jsonptr::{Assign, Pointer};
+use k8s_openapi::{
+    api::{
+        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
+        core::v1::{
+            Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, Namespace,
+            PodSecurityContext, PodSpec, ResourceRequirements, SecretKeySelector,
+            SecretVolumeSource, Volume, VolumeMount,
+        },
     },
+    apimachinery::pkg::util::intstr::IntOrString,
 };
 use kube::{
     Error, ResourceExt,
@@ -938,6 +943,16 @@ async fn render_sisyphus_resource(
 
             let mut independent_spec = DeploymentSpec::default();
             independent_spec.selector.match_labels = Some(labels.clone());
+            // Set some default values because otherwise we get diffs in them
+            independent_spec.progress_deadline_seconds = Some(600);
+            independent_spec.revision_history_limit = Some(10);
+            independent_spec.strategy = Some(DeploymentStrategy {
+                type_: Some("RollingUpdate".to_string()),
+                rolling_update: Some(RollingUpdateDeployment {
+                    max_surge: Some(IntOrString::String("25%".to_string())),
+                    max_unavailable: Some(IntOrString::String("25%".to_string())),
+                }),
+            });
             let mut template_metadata = ObjectMeta::default();
             template_metadata.labels = Some(labels);
             independent_spec.template.metadata = Some(template_metadata);
@@ -988,14 +1003,37 @@ async fn render_sisyphus_resource(
                 };
                 env_vars.push(var);
             }
-            container.args = Some(args);
-            container.env = Some(env_vars);
-            container.ports = Some(ports);
-            container.volume_mounts = Some(volume_mounts);
+            if args.len() > 0 {
+                container.args = Some(args);
+            }
+            if env_vars.len() > 0 {
+                container.env = Some(env_vars);
+            }
+            if ports.len() > 0 {
+                container.ports = Some(ports);
+            }
+            if volume_mounts.len() > 0 {
+                container.volume_mounts = Some(volume_mounts);
+            }
+
+            // Set some detaults
+            container.image_pull_policy = Some("IfNotPresent".to_string());
+            container.resources = Some(ResourceRequirements::default());
+            container.termination_message_path = Some("/dev/termination-log".to_string());
+            container.termination_message_policy = Some("File".to_string());
 
             let mut pod_spec = PodSpec::default();
             pod_spec.containers.push(container);
-            pod_spec.volumes = Some(volumes);
+            if volumes.len() > 0 {
+                pod_spec.volumes = Some(volumes);
+            }
+            // Set some defaults
+            pod_spec.dns_policy = Some("ClusterFirst".to_string());
+            pod_spec.restart_policy = Some("Always".to_string());
+            // TODO(april): this won't work when there's another scheduler
+            pod_spec.scheduler_name = Some("default-scheduler".to_string());
+            pod_spec.security_context = Some(PodSecurityContext::default());
+            pod_spec.termination_grace_period_seconds = Some(30);
             independent_spec.template.spec = Some(pod_spec);
 
             for (cluster, cluster_spec) in &v.footprint {
@@ -1006,8 +1044,12 @@ async fn render_sisyphus_resource(
                     spec: Some(spec),
                     status: None,
                 })?;
-                let converted =
+                let mut converted =
                     DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
+                converted.data.assign(
+                    Pointer::parse("/spec/template/metadata/creationTimestamp")?,
+                    JsonValue::Null,
+                )?;
                 let types = converted
                     .types
                     .clone()
