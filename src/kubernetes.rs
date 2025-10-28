@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use kube::{
-    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
+    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{
@@ -119,16 +119,16 @@ fn copy_unmanaged_fields(
                             }
                         }
                         found
-                    },
+                    }
                     None => Some(unused.remove(0)),
                 };
 
                 let new_value = match hv {
-                    Some(hvv) =>
-                        copy_unmanaged_fields(
-                            &hvv,
-                            wv,
-                            mv.map(|v| v.data).unwrap_or(&JsonValue::Null))?,
+                    Some(hvv) => copy_unmanaged_fields(
+                        &hvv,
+                        wv,
+                        mv.map(|v| v.data).unwrap_or(&JsonValue::Null),
+                    )?,
                     None => wv.clone(),
                 };
                 copy.push(new_value);
@@ -284,7 +284,10 @@ fn copy_single_unspecified_data(
             .iter()
             .filter(|m| m.manager == *us)
             .filter_map(|m| m.fields_v1.as_ref())
-            .fold(JsonValue::Null, |mut a, b| { json_patch::merge(&mut a, &b.0); a });
+            .fold(JsonValue::Null, |mut a, b| {
+                json_patch::merge(&mut a, &b.0);
+                a
+            });
         let copied = copy_unmanaged_fields(
             &serde_json::to_value(&mut *h)?,
             &serde_json::to_value(&mut *want)?,

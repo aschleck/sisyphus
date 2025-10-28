@@ -4,17 +4,17 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{Argument, ArgumentValues, get_config},
+    config_image::{get_config, Argument, ArgumentValues},
     kubernetes::{
-        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
-        make_comparable, munge_secrets,
+        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
+        KubernetesResources, MANAGER,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource, VariableSource},
 };
-use anyhow::{Context, Result, anyhow, bail};
-use clap::{Parser, Subcommand};
-use console::{Style, style};
+use anyhow::{anyhow, bail, Context, Result};
+use clap::{Args, Parser, Subcommand};
+use console::{style, Style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
@@ -31,12 +31,12 @@ use k8s_openapi::{
             SecretVolumeSource, Volume, VolumeMount,
         },
     },
-    apimachinery::pkg::util::intstr::IntOrString,
+    apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
 };
 use kube::{
-    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
+    Error, ResourceExt,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -53,7 +53,7 @@ use tempfile::TempDir;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
-struct Args {
+struct SisyphusArgs {
     #[command(subcommand)]
     command: Commands,
 
@@ -61,41 +61,69 @@ struct Args {
     database_url: String,
 }
 
+#[derive(Args, Debug)]
+struct FullKey {
+    #[arg(long)]
+    api_version: String,
+
+    #[arg(long)]
+    cluster: String,
+
+    #[arg(long)]
+    kind: String,
+
+    #[arg(long)]
+    name: String,
+
+    #[arg(long)]
+    namespace: Option<String>,
+}
+
+impl Into<KubernetesKey> for FullKey {
+    fn into(self) -> KubernetesKey {
+        KubernetesKey {
+            api_version: self.api_version,
+            cluster: self.cluster,
+            kind: self.kind,
+            name: self.name,
+            namespace: self.namespace,
+        }
+    }
+}
+
+#[derive(Args, Debug)]
+struct PartialKey {
+    #[arg(long)]
+    api_version: Option<String>,
+
+    #[arg(long)]
+    cluster: Option<String>,
+
+    #[arg(long)]
+    kind: Option<String>,
+
+    #[arg(long)]
+    name: Option<String>,
+
+    #[arg(long)]
+    namespace: Option<String>,
+}
+
 #[derive(Debug, Subcommand)]
 enum Commands {
     Forget {
-        #[arg(long)]
-        api_version: String,
-
-        #[arg(long)]
-        cluster: String,
-
-        #[arg(long)]
-        kind: String,
-
-        #[arg(long)]
-        name: String,
-
-        #[arg(long)]
-        namespace: Option<String>,
+        #[command(flatten)]
+        key: FullKey,
     },
     Import {
-        #[arg(long)]
-        api_version: String,
-
-        #[arg(long)]
-        cluster: String,
-
-        #[arg(long)]
-        kind: String,
-
-        #[arg(long)]
-        name: String,
-
-        #[arg(long)]
-        namespace: Option<String>,
+        #[command(flatten)]
+        key: FullKey,
     },
     Push {
+        // The filters to consider
+        #[command(flatten)]
+        filter: PartialKey,
+
         // The namespace to label resources with
         #[arg(long, env = "LABEL_NAMESPACE", default_value = "april.dev")]
         label_namespace: String,
@@ -111,52 +139,17 @@ enum Commands {
 async fn main() -> Result<()> {
     env_logger::init();
     sqlx::any::install_default_drivers();
-    let args = Args::parse();
+    let args = SisyphusArgs::parse();
     let pool = AnyPool::connect(&args.database_url).await?;
 
     match args.command {
-        Commands::Forget {
-            api_version,
-            cluster,
-            kind,
-            name,
-            namespace,
-        } => {
-            forget(
-                KubernetesKey {
-                    api_version,
-                    cluster,
-                    kind,
-                    name,
-                    namespace,
-                },
-                &pool,
-            )
-            .await?
-        }
-        Commands::Import {
-            api_version,
-            cluster,
-            kind,
-            name,
-            namespace,
-        } => {
-            import(
-                KubernetesKey {
-                    api_version,
-                    cluster,
-                    kind,
-                    name,
-                    namespace,
-                },
-                &pool,
-            )
-            .await?
-        }
+        Commands::Forget { key } => forget(key.into(), &pool).await?,
+        Commands::Import { key } => import(key.into(), &pool).await?,
         Commands::Push {
+            filter,
             label_namespace,
             monitor_directory,
-        } => push(&label_namespace, &monitor_directory, &pool).await?,
+        } => push(&filter, &label_namespace, &monitor_directory, &pool).await?,
         Commands::Refresh => refresh(&pool).await?,
     };
     Ok(())
@@ -293,7 +286,12 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
     Ok(())
 }
 
-async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) -> Result<()> {
+async fn push(
+    filter: &PartialKey,
+    label_namespace: &str,
+    monitor_directory: &str,
+    pool: &AnyPool,
+) -> Result<()> {
     let mut registries = RegistryClients::new();
     let mut from_files = KubernetesResources {
         by_key: BTreeMap::new(),
@@ -356,7 +354,7 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
     }
 
-    let from_database = get_objects_from_database(&pool).await?;
+    let mut from_database = get_objects_from_database(&pool).await?;
     for (k, to) in &mut from_files.by_key {
         let from = from_database.by_key.get(&k);
         if let Some(f) = from {
@@ -365,6 +363,20 @@ async fn push(label_namespace: &str, monitor_directory: &str, pool: &AnyPool) ->
         }
         munge_secrets(from, to)?;
     }
+
+    from_files
+        .by_key
+        .retain(|k, _| key_matches_filter(k, filter));
+    from_files
+        .namespaces
+        .retain(|k, _| key_matches_filter(k, filter));
+    from_database
+        .by_key
+        .retain(|k, _| key_matches_filter(k, filter));
+    from_database
+        .namespaces
+        .retain(|k, _| key_matches_filter(k, filter));
+
     let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
     let changed = generate_diff(comparable_database, comparable_files)?;
@@ -654,11 +666,10 @@ async fn refresh_group(changed: Vec<(KubernetesKey, DiffAction)>, pool: &AnyPool
 }
 
 async fn get_objects_from_database(pool: &AnyPool) -> Result<KubernetesResources> {
-    let mut tx = pool.begin().await?;
     let recs = sqlx::query(
         r#"SELECT api_version, cluster, kind, namespace, name, yaml FROM kubernetes_objects"#,
     )
-    .fetch_all(&mut *tx)
+    .fetch_all(pool)
     .await?;
 
     let mut resources = KubernetesResources {
@@ -704,7 +715,9 @@ async fn get_objects_from_kubernetes(
     .await?;
     let bar =
         ProgressBar::new((from_database.by_key.len() + from_database.namespaces.len()) as u64)
-            .with_style(ProgressStyle::with_template("Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}")?);
+            .with_style(ProgressStyle::with_template(
+            "Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}",
+        )?);
     for (source, destination) in [
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),
@@ -931,9 +944,9 @@ async fn render_sisyphus_resource(
             }
         }
         SisyphusResource::SisyphusDeployment(v) => {
-            let image = RegistryReference::from_str(&v.config.image)
-                .map_err(|e| anyhow!("Unable to parse image url: {}", e))?;
-            let registry = registries.get_client(&image.registry()).await?;
+            let (image, registry) = registries
+                .get_reference_and_registry(&v.config.image)
+                .await?;
             let repository = image.repository();
             let manifest = registry
                 .get_manifest(&repository, image.version().as_ref())
@@ -989,23 +1002,25 @@ async fn render_sisyphus_resource(
             let mut volume_mounts = Vec::new();
             let mut args = Vec::new();
             for arg in &application.args {
-                args.push(
-                    match render_argument(
-                        &arg,
-                        &v.config.env,
-                        &mut ports,
-                        &v.config.variables,
-                        &mut volumes,
-                        &mut volume_mounts,
-                    )? {
-                        RenderedArgument::String(v) => v,
-                        u => bail!("Unexpected non-string argument {:?}", u),
-                    },
-                );
+                let maybe = render_argument(
+                    &arg,
+                    &v.config.env,
+                    &mut ports,
+                    &v.config.variables,
+                    &mut volumes,
+                    &mut volume_mounts,
+                )?;
+                let Some(rendered) = maybe else {
+                    continue;
+                };
+                args.push(match rendered {
+                    RenderedArgument::String(v) => v,
+                    u => bail!("Unexpected non-string argument {:?}", u),
+                });
             }
             let mut env_vars = Vec::new();
             for (key, value) in &application.env {
-                let rendered = render_argument(
+                let maybe = render_argument(
                     &value,
                     &v.config.env,
                     &mut ports,
@@ -1013,6 +1028,9 @@ async fn render_sisyphus_resource(
                     &mut volumes,
                     &mut volume_mounts,
                 )?;
+                let Some(rendered) = maybe else {
+                    continue;
+                };
                 let mut var = EnvVar::default();
                 var.name = key.clone();
                 match rendered {
@@ -1025,6 +1043,52 @@ async fn render_sisyphus_resource(
                 };
                 env_vars.push(var);
             }
+            let mut resources = ResourceRequirements::default();
+            if application.resources.requests.len() > 0 {
+                let mut copy = BTreeMap::new();
+                for (key, value) in &application.resources.requests {
+                    let maybe = render_argument(
+                        &value,
+                        &v.config.env,
+                        &mut ports,
+                        &v.config.variables,
+                        &mut volumes,
+                        &mut volume_mounts,
+                    )?;
+                    let Some(rendered) = maybe else {
+                        continue;
+                    };
+                    let quantity = Quantity(match rendered {
+                        RenderedArgument::String(v) => v,
+                        v => bail!("Unexpected resource request type {:?}", v),
+                    });
+                    copy.insert(key.clone(), quantity);
+                }
+                resources.requests = Some(copy);
+            }
+            if application.resources.limits.len() > 0 {
+                let mut copy = BTreeMap::new();
+                for (key, value) in &application.resources.limits {
+                    let maybe = render_argument(
+                        &value,
+                        &v.config.env,
+                        &mut ports,
+                        &v.config.variables,
+                        &mut volumes,
+                        &mut volume_mounts,
+                    )?;
+                    let Some(rendered) = maybe else {
+                        continue;
+                    };
+                    let quantity = Quantity(match rendered {
+                        RenderedArgument::String(v) => v,
+                        v => bail!("Unexpected resource limit type {:?}", v),
+                    });
+                    copy.insert(key.clone(), quantity);
+                }
+                resources.limits = Some(copy);
+            }
+
             if args.len() > 0 {
                 container.args = Some(args);
             }
@@ -1034,13 +1098,13 @@ async fn render_sisyphus_resource(
             if ports.len() > 0 {
                 container.ports = Some(ports);
             }
+            container.resources = Some(resources);
             if volume_mounts.len() > 0 {
                 container.volume_mounts = Some(volume_mounts);
             }
 
-            // Set some detaults
+            // Set some defaults
             container.image_pull_policy = Some("IfNotPresent".to_string());
-            container.resources = Some(ResourceRequirements::default());
             container.termination_message_path = Some("/dev/termination-log".to_string());
             container.termination_message_policy = Some("File".to_string());
 
@@ -1106,17 +1170,19 @@ fn render_argument(
     variables: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
     volume_mounts: &mut Vec<VolumeMount>,
-) -> Result<RenderedArgument> {
-    let single = match arg {
-        ArgumentValues::Varying(a) => a
-            .get(selector)
-            .ok_or_else(|| anyhow!("No selector {} in {:?}", selector, a.keys()))?,
-        ArgumentValues::Uniform(a) => a,
+) -> Result<Option<RenderedArgument>> {
+    let maybe = match arg {
+        ArgumentValues::Varying(a) => a.get(selector),
+        ArgumentValues::Uniform(a) => Some(a),
     };
-    Ok(match single {
+    let Some(single) = maybe else {
+        return Ok(None);
+    };
+    Ok(Some(match single {
         Argument::FileVariable(v) => {
             let mut mount = VolumeMount::default();
             mount.name = v.name.clone();
+            mount.read_only = Some(true);
             let path = Path::new(&v.path);
             mount.mount_path = String::from(
                 path.parent()
@@ -1173,16 +1239,16 @@ fn render_argument(
             };
             RenderedArgument::ValueFrom(source)
         }
-    })
+    }))
 }
 
 async fn resolve_sisyphus_deployment_image(
     object: &mut SisyphusDeployment,
     registries: &mut RegistryClients,
 ) -> Result<()> {
-    let image = RegistryReference::from_str(&object.config.image)
-        .map_err(|e| anyhow!("Unable to parse image url: {}", e))?;
-    let registry = registries.get_client(&image.registry()).await?;
+    let (image, registry) = registries
+        .get_reference_and_registry(&object.config.image)
+        .await?;
     let manifest = registry
         .get_manifest(image.repository().as_ref(), image.version().as_ref())
         .await
@@ -1299,6 +1365,35 @@ fn ask_for_user_permission(verb: &str) -> Result<bool> {
             false
         }
     })
+}
+
+fn key_matches_filter(key: &KubernetesKey, filter: &PartialKey) -> bool {
+    if let Some(v) = &filter.api_version {
+        if &key.api_version != v {
+            return false;
+        }
+    }
+    if let Some(v) = &filter.cluster {
+        if &key.cluster != v {
+            return false;
+        }
+    }
+    if let Some(v) = &filter.kind {
+        if &key.kind != v {
+            return false;
+        }
+    }
+    if let Some(v) = &filter.name {
+        if &key.name != v {
+            return false;
+        }
+    }
+    if filter.namespace.is_some() {
+        if key.namespace != filter.namespace {
+            return false;
+        }
+    }
+    true
 }
 
 fn print_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> () {

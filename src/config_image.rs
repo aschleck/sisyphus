@@ -1,5 +1,5 @@
 use allocative::Allocative;
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
@@ -8,8 +8,8 @@ use starlark::{
     starlark_module,
     syntax::{AstModule, Dialect},
     values::{
-        NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike, dict::UnpackDictEntries,
-        float::StarlarkFloat, list_or_tuple::UnpackListOrTuple, starlark_value,
+        dict::UnpackDictEntries, float::StarlarkFloat, list_or_tuple::UnpackListOrTuple,
+        starlark_value, NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike,
     },
 };
 use std::{collections::BTreeMap, convert::TryInto, fmt, path::Path};
@@ -25,6 +25,7 @@ pub(crate) struct ConfigImageIndex {
 pub(crate) struct Application {
     pub args: Vec<ArgumentValues>,
     pub env: BTreeMap<String, ArgumentValues>,
+    pub resources: Resources,
 }
 
 impl fmt::Display for Application {
@@ -80,7 +81,13 @@ impl ArgumentValues {
             Ok(Self::Varying(
                 v.entries
                     .into_iter()
-                    .map(|(k, v)| Argument::unpack_value(v).map(|v| (k, v)))
+                    .filter_map(|(k, v)| {
+                        if v.is_none() {
+                            None
+                        } else {
+                            Some(Argument::unpack_value(v).map(|v| (k, v)))
+                        }
+                    })
                     .collect::<starlark::Result<BTreeMap<_, _>>>()?,
             ))
         } else {
@@ -119,6 +126,25 @@ impl fmt::Display for Port {
 #[starlark_value(type = "Port", UnpackValue, StarlarkTypeRepr)]
 impl<'v> StarlarkValue<'v> for Port {}
 
+#[derive(Allocative, Clone, Debug, Default, NoSerialize, ProvidesStaticType)]
+pub(crate) struct Resources {
+    pub requests: BTreeMap<String, ArgumentValues>,
+    pub limits: BTreeMap<String, ArgumentValues>,
+}
+
+impl fmt::Display for Resources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "Resources(requests={:?}, limits={:?})",
+            self.requests, self.limits
+        )
+    }
+}
+
+#[starlark_value(type = "Resources", UnpackValue, StarlarkTypeRepr)]
+impl<'v> StarlarkValue<'v> for Resources {}
+
 #[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
 pub(crate) struct StringVariable {
     pub name: String,
@@ -136,24 +162,30 @@ impl<'v> StarlarkValue<'v> for StringVariable {}
 #[starlark_module]
 fn starlark_types(builder: &mut GlobalsBuilder) {
     fn Application<'v>(
-        #[starlark(require = named)] args: Value,
-        #[starlark(require = named)] env: Value,
+        #[starlark(require = named)] args: Option<Value>,
+        #[starlark(require = named)] env: Option<Value>,
+        #[starlark(require = named)] resources: Option<Value>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        let args_value = UnpackListOrTuple::unpack_value(args)?
-            .ok_or_else(|| function_error("args must be a list or tuple"))?
-            .into_iter()
-            .map(|v| ArgumentValues::unpack_value(v))
-            .collect::<starlark::Result<Vec<_>>>()?;
-        let env_value = UnpackDictEntries::<String, Value>::unpack_value(env)?
-            .ok_or_else(|| function_error("env must be a list or tuple"))?
-            .entries
-            .into_iter()
-            .map(|(k, v)| ArgumentValues::unpack_value(v).map(|v| (k, v)))
-            .collect::<starlark::Result<BTreeMap<_, _>>>()?;
+        let args_value = match args {
+            Some(a) => unpack_vec("args", a)?,
+            None => Vec::new(),
+        };
+        let env_value = match env {
+            Some(e) => unpack_map("env", e)?,
+            None => BTreeMap::new(),
+        };
+        let resources_value = match resources {
+            Some(r) => r
+                .downcast_ref::<Resources>()
+                .ok_or_else(|| function_error("resources must be a Resources object"))?
+                .clone(),
+            None => Resources::default(),
+        };
         Ok(eval.heap().alloc_simple(Application {
             args: args_value,
             env: env_value,
+            resources: resources_value,
         }))
     }
 
@@ -192,6 +224,25 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc_simple(Port {
             name: as_string,
             number: as_u16,
+        }))
+    }
+
+    fn Resources<'v>(
+        #[starlark(require = named)] requests: Option<Value>,
+        #[starlark(require = named)] limits: Option<Value>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let requests_value = match requests {
+            Some(r) => unpack_map("requests", r)?,
+            None => BTreeMap::new(),
+        };
+        let limits_value = match limits {
+            Some(l) => unpack_map("limits", l)?,
+            None => BTreeMap::new(),
+        };
+        Ok(eval.heap().alloc_simple(Resources {
+            requests: requests_value,
+            limits: limits_value,
         }))
     }
 
@@ -251,8 +302,25 @@ pub(crate) async fn get_config(root: &Path) -> Result<(ConfigImageIndex, Applica
     Ok((index, application))
 }
 
-fn function_error(message: &str) -> starlark::Error {
+fn function_error(message: impl AsRef<str>) -> starlark::Error {
     return starlark::Error::new_kind(starlark::ErrorKind::Function(anyhow::Error::msg(
-        message.to_string(),
+        message.as_ref().to_string(),
     )));
+}
+
+fn unpack_map(name: &str, source: Value) -> starlark::Result<BTreeMap<String, ArgumentValues>> {
+    UnpackDictEntries::<String, Value>::unpack_value(source)?
+        .ok_or_else(|| function_error(format!("{} must be a list or tuple", name)))?
+        .entries
+        .into_iter()
+        .map(|(k, v)| ArgumentValues::unpack_value(v).map(|v| (k, v)))
+        .collect::<starlark::Result<BTreeMap<_, _>>>()
+}
+
+fn unpack_vec(name: &str, source: Value) -> starlark::Result<Vec<ArgumentValues>> {
+    UnpackListOrTuple::unpack_value(source)?
+        .ok_or_else(|| function_error(format!("{} must be a list or tuple", name)))?
+        .into_iter()
+        .map(|v| ArgumentValues::unpack_value(v))
+        .collect::<starlark::Result<Vec<_>>>()
 }
