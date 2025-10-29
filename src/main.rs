@@ -4,7 +4,7 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{get_config, Argument, ArgumentValues},
+    config_image::{get_config, Argument, ArgumentValues, FileVariable},
     kubernetes::{
         get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
         KubernetesResources, MANAGER,
@@ -1179,41 +1179,11 @@ fn render_argument(
         return Ok(None);
     };
     Ok(Some(match single {
-        Argument::FileVariable(v) => {
-            let mut mount = VolumeMount::default();
-            mount.name = v.name.clone();
-            mount.read_only = Some(true);
-            let path = Path::new(&v.path);
-            mount.mount_path = String::from(
-                path.parent()
-                    .ok_or_else(|| anyhow!("Variable path has no parent"))?
-                    .to_string_lossy(),
-            );
-            volume_mounts.push(mount);
-
-            let mut volume = Volume::default();
-            volume.name = v.name.clone();
-            let variable = variables
-                .get(&v.name)
-                .ok_or_else(|| anyhow!("Variable {} isn't set", v.name))?;
-            match variable {
-                VariableSource::SecretKeyRef(v) => {
-                    let mut secret = SecretVolumeSource::default();
-                    secret.secret_name = Some(v.name.clone());
-                    secret.items = Some(vec![KeyToPath {
-                        key: v.key.clone(),
-                        mode: None,
-                        path: String::from(
-                            path.file_name()
-                                .ok_or_else(|| anyhow!("Unable to get file name"))?
-                                .to_string_lossy(),
-                        ),
-                    }]);
-                    volume.secret = Some(secret);
-                }
-            };
-            volumes.push(volume);
-            RenderedArgument::String(v.path.clone())
+        Argument::FileVariable(var) => {
+            let source = variables
+                .get(&var.name)
+                .ok_or_else(|| anyhow!("Variable {} isn't set", var.name))?;
+            render_file_variable(var, source, volumes, volume_mounts)?
         }
         Argument::Port(v) => {
             let mut port = ContainerPort::default();
@@ -1240,6 +1210,98 @@ fn render_argument(
             RenderedArgument::ValueFrom(source)
         }
     }))
+}
+
+fn render_file_variable(
+    variable: &FileVariable,
+    source: &VariableSource,
+    volumes: &mut Vec<Volume>,
+    volume_mounts: &mut Vec<VolumeMount>,
+) -> Result<RenderedArgument> {
+    let path = Path::new(&variable.path);
+    let filename = path
+        .file_name()
+        .ok_or_else(|| anyhow!("Unable to get file name"))?
+        .to_string_lossy();
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow!("Variable path has no parent"))?
+        .to_string_lossy();
+
+    let volume = match source {
+        VariableSource::SecretKeyRef(secret_source) => {
+            let existing_volume = volumes.iter_mut().find(|volume| {
+                volume
+                    .secret
+                    .as_ref()
+                    .map(|secret| secret.secret_name.as_ref() == Some(&secret_source.name))
+                    .unwrap_or(false)
+            });
+            match existing_volume {
+                Some(v) => v,
+                None => {
+                    let mut volume = Volume::default();
+                    volume.name = variable.name.clone();
+                    let mut secret = SecretVolumeSource::default();
+                    // TODO(april): the following 420 is the default from Kubernetes but it's
+                    // confusing. Why does the group have write? We set read_only below, what does
+                    // this even mean?
+                    secret.default_mode = Some(420);
+                    secret.secret_name = Some(secret_source.name.clone());
+                    secret.items = Some(Vec::new());
+                    volume.secret = Some(secret);
+                    volumes.push(volume);
+                    volumes.last_mut().unwrap()
+                }
+            }
+        }
+    };
+
+    match source {
+        VariableSource::SecretKeyRef(_) => {
+            let existing_mount = volume_mounts
+                .iter()
+                .find(|mount| mount.name == volume.name && mount.mount_path == parent);
+            match existing_mount {
+                Some(m) => m,
+                None => {
+                    // TODO(april): can we mount the same volume multiple times?
+                    let mut mount = VolumeMount::default();
+                    mount.name = volume.name.clone();
+                    mount.read_only = Some(true);
+                    mount.mount_path = String::from(parent);
+                    volume_mounts.push(mount);
+                    volume_mounts.last().unwrap()
+                }
+            }
+        }
+    };
+
+    match source {
+        VariableSource::SecretKeyRef(secret_source) => {
+            let Some(secret) = volume.secret.as_mut() else {
+                unreachable!("Expected secret");
+            };
+            let Some(items) = secret.items.as_mut() else {
+                unreachable!("Expected items");
+            };
+            let existing_item = items
+                .iter()
+                .find(|i| secret_source.key == i.key && filename == i.path);
+            match existing_item {
+                Some(_) => (),
+                None => {
+                    items.push(KeyToPath {
+                        key: secret_source.key.clone(),
+                        mode: None,
+                        path: String::from(filename),
+                    });
+                }
+            }
+        }
+    };
+
+    Ok(RenderedArgument::String(variable.path.clone()))
 }
 
 async fn resolve_sisyphus_deployment_image(

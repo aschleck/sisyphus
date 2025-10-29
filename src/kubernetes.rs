@@ -120,7 +120,13 @@ fn copy_unmanaged_fields(
                         }
                         found
                     }
-                    None => Some(unused.remove(0)),
+                    None => {
+                        if unused.len() > 0 {
+                            Some(unused.remove(0))
+                        } else {
+                            None
+                        }
+                    }
                 };
 
                 let new_value = match hv {
