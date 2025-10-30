@@ -254,7 +254,7 @@ sisyphus \
 * [ ] Safe namespace deletions
 * [ ] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse
-* [ ] Resource requests and limits on Sisyphus deployments
+* [x] Resource requests and limits on Sisyphus deployments
 * [ ] Default values for StringVariables so server specs can be overridden when running locally
 * [x] `SisyphusYaml` objects to include more yaml from the index.yaml file
 * [ ] Tests
