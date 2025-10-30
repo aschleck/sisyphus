@@ -71,9 +71,26 @@ def main(ctx):
             "HTTP_PORT": {
                 "prod": Port(name="http", number=80),
                 "test": Port(name="http", number=80),
-                "dev": Port(name="http", number=8080),
+                "dev": Port(name="http", number=8080, protocol="TCP"),  # protocol defaults to TCP
             },
         },
+        resources=Resources(
+            requests={
+                "cpu": {
+                    "prod": 16,
+                    "test": 2,
+                    "dev": None,
+                },
+                "memory": {
+                    "prod": "8Gb",
+                    "test": "2Gb",
+                },
+            },
+            limits={
+                "cpu": 32,
+                "memory": "16Gb",
+            },
+        ),
     )
 ````
 
