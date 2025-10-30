@@ -1,5 +1,5 @@
 use allocative::Allocative;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
@@ -8,8 +8,8 @@ use starlark::{
     starlark_module,
     syntax::{AstModule, Dialect},
     values::{
-        dict::UnpackDictEntries, float::StarlarkFloat, list_or_tuple::UnpackListOrTuple,
-        starlark_value, NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike,
+        NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike, dict::UnpackDictEntries,
+        float::StarlarkFloat, list_or_tuple::UnpackListOrTuple, starlark_value,
     },
 };
 use std::{collections::BTreeMap, convert::TryInto, fmt, path::Path};
@@ -115,11 +115,35 @@ impl<'v> StarlarkValue<'v> for FileVariable {}
 pub(crate) struct Port {
     pub name: String,
     pub number: u16,
+    pub protocol: Protocol,
 }
 
 impl fmt::Display for Port {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        write!(f, "Port(name={}, number={})", self.name, self.number)
+        write!(
+            f,
+            "Port(name={}, number={}, protocol={})",
+            self.name, self.number, self.protocol
+        )
+    }
+}
+
+#[derive(Allocative, Clone, Debug)]
+pub(crate) enum Protocol {
+    TCP,
+    UDP,
+}
+
+impl fmt::Display for Protocol {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "{}",
+            match self {
+                Protocol::TCP => "TCP",
+                Protocol::UDP => "UDP",
+            }
+        )
     }
 }
 
@@ -209,9 +233,10 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
     fn Port<'v>(
         #[starlark(require = named)] name: Value,
         #[starlark(require = named)] number: Value,
+        #[starlark(require = named)] protocol: Option<Value>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
-        let as_string = name
+        let name_str = name
             .unpack_str()
             .ok_or_else(|| function_error("name must be a str"))?
             .to_string();
@@ -221,9 +246,22 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
         let as_u16: u16 = as_i32
             .try_into()
             .map_err(|_| function_error("number must be a u16"))?;
+        let protocol = match protocol {
+            Some(n) => match n
+                .unpack_str()
+                .ok_or_else(|| function_error("protocol must be a str"))?
+            {
+                "TCP" => Protocol::TCP,
+                "UDP" => Protocol::UDP,
+                _ => return Err(function_error("protocol must be either TCP or UDP or None")),
+            },
+            None => Protocol::TCP,
+        };
+
         Ok(eval.heap().alloc_simple(Port {
-            name: as_string,
+            name: name_str,
             number: as_u16,
+            protocol,
         }))
     }
 

@@ -1,9 +1,9 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use kube::{
+    Discovery, ResourceExt,
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
     discovery::{ApiCapabilities, Scope},
-    Discovery, ResourceExt,
 };
 use serde_json::Value as JsonValue;
 use std::{

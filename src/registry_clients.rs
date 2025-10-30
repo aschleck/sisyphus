@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use docker_credential::{self, CredentialRetrievalError, DockerCredential};
 use docker_registry::{reference::Reference as RegistryReference, v2::Client as RegistryClient};
 use std::collections::HashMap;

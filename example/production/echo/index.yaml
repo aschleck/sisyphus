@@ -1,10 +1,15 @@
 apiVersion: sisyphus/v1
-kind: SisyphusDeployment
+kind: Deployment
 metadata:
   name: echo
 config:
   env: prod
   image: us-docker.pkg.dev/acme/containers/echo_config:latest
+  service:
+    ports:
+      http:  # the name of the port in the Starlark config
+        name: http  # optional, allows renaming ports in the service
+        number: 80
   variables:
     google-credentials:
       secretKeyRef:
@@ -39,18 +44,9 @@ objects:
       name: tokens
     stringData:
       secret-token: replace-me
-clusters:
-  - gke_acme_us-central1_ap-us-central1
-  - gke_acme_us-west4_ap-us-west4
-
----
-
-apiVersion: sisyphus/v1
-kind: KubernetesYaml
-metadata:
-  name: you-can-include-kubernetes-yaml-files
-sources:
-  - service.yaml
+# alternatively you could import Kubernetes YAML from another file like this:
+# sources:
+#   - secret.yaml
 clusters:
   - gke_acme_us-central1_ap-us-central1
   - gke_acme_us-west4_ap-us-west4

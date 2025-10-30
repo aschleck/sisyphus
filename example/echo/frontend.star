@@ -17,7 +17,7 @@ def main(ctx):
             "HTTP_PORT": {
                 "prod": Port(name="http", number=80),
                 "test": Port(name="http", number=80),
-                "dev": Port(name="http", number=8080),
+                "dev": Port(name="http", number=8080, protocol="TCP"),  # protocol defaults to TCP
             },
         },
         resources=Resources(

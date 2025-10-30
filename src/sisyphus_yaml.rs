@@ -6,27 +6,13 @@ use std::collections::BTreeMap;
 #[serde(tag = "kind")]
 pub enum SisyphusResource {
     KubernetesYaml(KubernetesYaml),
+    #[serde(rename = "Deployment")]
     SisyphusDeployment(SisyphusDeployment),
     SisyphusYaml(SisyphusYaml),
 }
 
 pub trait HasKind {
     fn kind(&self) -> &'static str;
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct SisyphusDeployment {
-    pub api_version: String,
-    pub metadata: Metadata,
-    pub config: DeploymentConfig,
-    pub footprint: BTreeMap<String, FootprintEntry>,
-}
-
-impl HasKind for SisyphusDeployment {
-    fn kind(&self) -> &'static str {
-        "SisyphusDeployment"
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -44,6 +30,21 @@ pub struct KubernetesYaml {
 impl HasKind for KubernetesYaml {
     fn kind(&self) -> &'static str {
         "KubernetesYaml"
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SisyphusDeployment {
+    pub api_version: String,
+    pub metadata: Metadata,
+    pub config: DeploymentConfig,
+    pub footprint: BTreeMap<String, FootprintEntry>,
+}
+
+impl HasKind for SisyphusDeployment {
+    fn kind(&self) -> &'static str {
+        "SisyphusDeployment"
     }
 }
 
@@ -77,7 +78,21 @@ pub struct Metadata {
 pub struct DeploymentConfig {
     pub env: String,
     pub image: String,
+    pub service: Option<DeploymentServiceConfig>,
     pub variables: BTreeMap<String, VariableSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeploymentServiceConfig {
+    pub ports: BTreeMap<String, ServicePort>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ServicePort {
+    pub name: Option<String>,
+    pub number: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

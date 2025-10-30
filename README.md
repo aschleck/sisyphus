@@ -124,10 +124,10 @@ file from the last section. An example `index.json` file is shown below.
 }
 ```
 
-### Deploying with `SisyphusDeployment`
+### Deploying with `Deployment`
 
 Once your images are built and pushed, you define your Kubernetes deployment using a
-`SisyphusDeployment` resource in a Sisyphus YAML file. This object's `image` property references
+`Deployment` resource in a Sisyphus YAML file. This object's `image` property references
 your config image and `variables` assigns values to the variables define in your Starlark file.
 
 ````yaml

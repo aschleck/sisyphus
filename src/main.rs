@@ -4,17 +4,17 @@ mod registry_clients;
 mod sisyphus_yaml;
 
 use crate::{
-    config_image::{get_config, Argument, ArgumentValues, FileVariable},
+    config_image::{Argument, ArgumentValues, FileVariable, get_config},
     kubernetes::{
-        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
-        KubernetesResources, MANAGER,
+        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
+        make_comparable, munge_secrets,
     },
     registry_clients::RegistryClients,
     sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource, VariableSource},
 };
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use clap::{Args, Parser, Subcommand};
-use console::{style, Style};
+use console::{Style, style};
 use docker_registry::{
     reference::{Reference as RegistryReference, Version as RegistryVersion},
     render as containerRender,
@@ -28,15 +28,15 @@ use k8s_openapi::{
         core::v1::{
             Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, Namespace,
             PodSecurityContext, PodSpec, ResourceRequirements, SecretKeySelector,
-            SecretVolumeSource, Volume, VolumeMount,
+            SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
 };
 use kube::{
+    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
-    Error, ResourceExt,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -713,11 +713,12 @@ async fn get_objects_from_kubernetes(
             .chain(from_database.namespaces.keys()),
     )
     .await?;
-    let bar =
-        ProgressBar::new((from_database.by_key.len() + from_database.namespaces.len()) as u64)
-            .with_style(ProgressStyle::with_template(
-            "Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}",
-        )?);
+    let bar = ProgressBar::new(
+        (from_database.by_key.len() + from_database.namespaces.len()) as u64,
+    )
+    .with_style(ProgressStyle::with_template(
+        "Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}",
+    )?);
     for (source, destination) in [
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),
@@ -989,7 +990,7 @@ async fn render_sisyphus_resource(
                 }),
             });
             let mut template_metadata = ObjectMeta::default();
-            template_metadata.labels = Some(labels);
+            template_metadata.labels = Some(labels.clone());
             independent_spec.template.metadata = Some(template_metadata);
             let mut container = Container::default();
             container.name = v.metadata.name.clone();
@@ -997,7 +998,7 @@ async fn render_sisyphus_resource(
                 "{}@{}",
                 index.binary_repository, index.binary_digest
             ));
-            let mut ports = Vec::new();
+            let mut ports = BTreeMap::new();
             let mut volumes = Vec::new();
             let mut volume_mounts = Vec::new();
             let mut args = Vec::new();
@@ -1096,7 +1097,7 @@ async fn render_sisyphus_resource(
                 container.env = Some(env_vars);
             }
             if ports.len() > 0 {
-                container.ports = Some(ports);
+                container.ports = Some(ports.iter().map(|(_, v)| v.clone()).collect());
             }
             container.resources = Some(resources);
             if volume_mounts.len() > 0 {
@@ -1122,32 +1123,88 @@ async fn render_sisyphus_resource(
             pod_spec.termination_grace_period_seconds = Some(30);
             independent_spec.template.spec = Some(pod_spec);
 
+            let mut service_spec = ServiceSpec::default();
+            service_spec.selector = Some(labels.clone());
+            service_spec.ports = v
+                .config
+                .service
+                .as_ref()
+                .map(|p| {
+                    p.ports
+                        .iter()
+                        .map(|(k, v)| -> Result<ServicePort> {
+                            let target = k;
+                            let references = ports.get(target).ok_or_else(|| {
+                                anyhow!("The config doesn't define a port named {}", target)
+                            })?;
+                            let mut sp = ServicePort::default();
+                            sp.name = Some(v.name.as_ref().unwrap_or(k).clone());
+                            sp.port = v.number;
+                            sp.protocol = references.protocol.clone();
+                            sp.target_port = Some(IntOrString::String(k.clone()));
+                            Ok(sp)
+                        })
+                        .collect()
+                })
+                .transpose()?;
+
             for (cluster, cluster_spec) in &v.footprint {
-                let mut spec = independent_spec.clone();
-                spec.replicas = Some(cluster_spec.replicas);
-                let serialized = serde_yaml::to_string(&Deployment {
-                    metadata: metadata.clone(),
-                    spec: Some(spec),
-                    status: None,
-                })?;
-                let mut converted =
-                    DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
-                converted.data.assign(
-                    Pointer::parse("/spec/template/metadata/creationTimestamp")?,
-                    JsonValue::Null,
-                )?;
-                let types = converted
-                    .types
-                    .clone()
-                    .ok_or_else(|| anyhow!("Object {} is type-free", converted.name_any()))?;
-                let key = KubernetesKey {
-                    api_version: types.api_version,
-                    cluster: cluster.clone(),
-                    kind: types.kind,
-                    name: v.metadata.name.clone(),
-                    namespace: Some(namespace.clone()),
-                };
-                by_key.insert(key, converted);
+                {
+                    let mut spec = independent_spec.clone();
+                    spec.replicas = Some(cluster_spec.replicas);
+                    let serialized = serde_yaml::to_string(&Deployment {
+                        metadata: metadata.clone(),
+                        spec: Some(spec),
+                        status: None,
+                    })?;
+                    let mut converted = DynamicObject::deserialize(
+                        serde_yaml::Deserializer::from_str(&serialized),
+                    )?;
+                    converted.data.assign(
+                        Pointer::parse("/spec/template/metadata/creationTimestamp")?,
+                        JsonValue::Null,
+                    )?;
+                    let types = converted
+                        .types
+                        .clone()
+                        .ok_or_else(|| anyhow!("Object {} is type-free", converted.name_any()))?;
+                    let key = KubernetesKey {
+                        api_version: types.api_version,
+                        cluster: cluster.clone(),
+                        kind: types.kind,
+                        name: v.metadata.name.clone(),
+                        namespace: Some(namespace.clone()),
+                    };
+                    by_key.insert(key, converted);
+                }
+
+                if service_spec
+                    .ports
+                    .as_ref()
+                    .map(|p| p.len() > 0)
+                    .unwrap_or(false)
+                {
+                    let serialized = serde_yaml::to_string(&Service {
+                        metadata: metadata.clone(),
+                        spec: Some(service_spec.clone()),
+                        status: None,
+                    })?;
+                    let converted = DynamicObject::deserialize(
+                        serde_yaml::Deserializer::from_str(&serialized),
+                    )?;
+                    let types = converted
+                        .types
+                        .clone()
+                        .ok_or_else(|| anyhow!("Object {} is type-free", converted.name_any()))?;
+                    let key = KubernetesKey {
+                        api_version: types.api_version,
+                        cluster: cluster.clone(),
+                        kind: types.kind,
+                        name: v.metadata.name.clone(),
+                        namespace: Some(namespace.clone()),
+                    };
+                    by_key.insert(key, converted);
+                }
             }
         }
         SisyphusResource::SisyphusYaml(_) => {
@@ -1166,7 +1223,7 @@ enum RenderedArgument {
 fn render_argument(
     arg: &ArgumentValues,
     selector: &str,
-    ports: &mut Vec<ContainerPort>,
+    ports: &mut BTreeMap<String, ContainerPort>,
     variables: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
     volume_mounts: &mut Vec<VolumeMount>,
@@ -1189,7 +1246,8 @@ fn render_argument(
             let mut port = ContainerPort::default();
             port.name = Some(v.name.clone());
             port.container_port = v.number.into();
-            ports.push(port);
+            port.protocol = Some(format!("{}", v.protocol));
+            ports.insert(v.name.clone(), port);
             RenderedArgument::String(v.number.to_string())
         }
         Argument::String(v) => RenderedArgument::String(v.clone()),
