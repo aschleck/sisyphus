@@ -59,7 +59,14 @@ fn copy_unmanaged_fields(
             let mut selectors = Vec::new();
             for (k, v) in m {
                 let Some((t, s)) = k.split_once(":") else {
-                    bail!("Unknown selector {}", k);
+                    // TODO(april): what to do when we already own the whole object? I think this is
+                    // a bad default but will fix it when I have a case where it does the wrong
+                    // thing.
+                    if k == "." {
+                        continue;
+                    } else {
+                        bail!("Unknown selector {}", k);
+                    }
                 };
                 if t != "k" {
                     bail!("Unknown type of selector {}", t);
@@ -73,6 +80,7 @@ fn copy_unmanaged_fields(
 
             // Try to find the matching rules for every key
             let mut copy = Vec::new();
+            let mut unmatched = Vec::new();
             let mut unused = h.clone();
             for i in 0..w.len() {
                 let wv = w.get(i).unwrap();
@@ -121,11 +129,9 @@ fn copy_unmanaged_fields(
                         found
                     }
                     None => {
-                        if unused.len() > 0 {
-                            Some(unused.remove(0))
-                        } else {
-                            None
-                        }
+                        // Delay matching unloved ones until after we match everything else
+                        unmatched.push(i);
+                        None
                     }
                 };
 
@@ -139,6 +145,15 @@ fn copy_unmanaged_fields(
                 };
                 copy.push(new_value);
             }
+
+            for i in unmatched {
+                if unused.len() > 0 {
+                    let hv = unused.remove(0);
+                    let wv = copy.get_mut(i).unwrap();
+                    *wv = copy_unmanaged_fields(&hv, &wv, &JsonValue::Null)?;
+                }
+            }
+
             JsonValue::Array(copy)
         }
         (JsonValue::Array(h), JsonValue::Array(w), JsonValue::Null) => {
