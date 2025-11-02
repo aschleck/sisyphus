@@ -6,23 +6,23 @@ mod sisyphus_yaml;
 
 use crate::{
     kubernetes::{
-        KubernetesKey, KubernetesResources, MANAGER, get_kubernetes_api, get_kubernetes_clients,
-        make_comparable, munge_secrets,
+        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
+        KubernetesResources, MANAGER,
     },
     registry_clients::RegistryClients,
     rendering::render_sisyphus_resource,
     sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource},
 };
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
-use console::{Style, style};
+use console::{style, Style};
 use docker_registry::reference::{Reference as RegistryReference, Version as RegistryVersion};
 use indicatif::{ProgressBar, ProgressStyle};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
-    Error, ResourceExt,
     api::{DeleteParams, DynamicObject, ObjectMeta, Patch, PatchParams},
     core::ErrorResponse,
+    Error, ResourceExt,
 };
 use serde::Deserialize;
 use similar::{ChangeTag, TextDiff};
@@ -697,12 +697,11 @@ async fn get_objects_from_kubernetes(
             .chain(from_database.namespaces.keys()),
     )
     .await?;
-    let bar = ProgressBar::new(
-        (from_database.by_key.len() + from_database.namespaces.len()) as u64,
-    )
-    .with_style(ProgressStyle::with_template(
-        "Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}",
-    )?);
+    let bar =
+        ProgressBar::new((from_database.by_key.len() + from_database.namespaces.len()) as u64)
+            .with_style(ProgressStyle::with_template(
+            "Comparing resources... {wide_bar:.magenta/dim} {pos:>7}/{len:7} {elapsed}/{duration}",
+        )?);
     for (source, destination) in [
         (&from_database.by_key, &mut resources.by_key),
         (&from_database.namespaces, &mut resources.namespaces),

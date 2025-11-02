@@ -1,10 +1,12 @@
 use crate::{
-    config_image::{get_config, Application, Argument, ArgumentValues, ConfigImageIndex, FileVariable},
+    config_image::{
+        get_config, Application, Argument, ArgumentValues, ConfigImageIndex, FileVariable,
+    },
     kubernetes::KubernetesKey,
     registry_clients::RegistryClients,
     sisyphus_yaml::{DeploymentServiceConfig, SisyphusResource, VariableSource},
 };
-use anyhow::{Result, anyhow, bail};
+use anyhow::{anyhow, bail, Result};
 use docker_registry::render as containerRender;
 use futures::future::try_join_all;
 use json_patch::jsonptr::{Assign, Pointer};
@@ -20,8 +22,8 @@ use k8s_openapi::{
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
 };
 use kube::{
-    ResourceExt,
     api::{DynamicObject, ObjectMeta},
+    ResourceExt,
 };
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
@@ -67,11 +69,8 @@ pub(crate) async fn render_sisyphus_resource(
 
             independent_spec.template.spec = Some(build_pod_spec(container, volumes));
 
-            let service_spec_option = build_service_spec(
-                &v.config.service,
-                &ports,
-                labels.clone(),
-            )?;
+            let service_spec_option =
+                build_service_spec(&v.config.service, &ports, labels.clone())?;
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -84,7 +83,8 @@ pub(crate) async fn render_sisyphus_resource(
                 &service_spec_option,
                 namespace,
                 by_key,
-            ).await?;
+            )
+            .await?;
         }
         SisyphusResource::SisyphusYaml(_) => {
             unreachable!("These should already have been resolved")
@@ -130,9 +130,7 @@ async fn prepare_image_config(
     image_config: &String,
     registries: &mut RegistryClients,
 ) -> Result<(ConfigImageIndex, Application)> {
-    let (image, registry) = registries
-        .get_reference_and_registry(image_config)
-        .await?;
+    let (image, registry) = registries.get_reference_and_registry(image_config).await?;
     let repository = image.repository();
     let manifest = registry
         .get_manifest(&repository, image.version().as_ref())
@@ -157,7 +155,10 @@ fn render_deployment_metadata(
     maybe_namespace: &Option<String>,
 ) -> Result<ObjectMeta> {
     let mut labels = deployment_labels.clone();
-    labels.insert(format!("{}/app", label_namespace), deployment_name.to_string());
+    labels.insert(
+        format!("{}/app", label_namespace),
+        deployment_name.to_string(),
+    );
 
     let mut metadata = ObjectMeta::default();
     if deployment_annotations.len() > 0 {
@@ -226,7 +227,14 @@ fn render_container_env_vars(
 ) -> Result<Vec<EnvVar>> {
     let mut env_vars = Vec::new();
     for (key, value) in application_env {
-        let maybe = render_argument(value, config_env, ports, config_vars, volumes, volume_mounts)?;
+        let maybe = render_argument(
+            value,
+            config_env,
+            ports,
+            config_vars,
+            volumes,
+            volume_mounts,
+        )?;
         let Some(rendered) = maybe else {
             continue;
         };
@@ -255,7 +263,14 @@ fn render_resource_requirements_map(
 ) -> Result<BTreeMap<String, Quantity>> {
     let mut copy = BTreeMap::new();
     for (key, value) in resource_map {
-        let maybe = render_argument(value, config_env, ports, config_vars, volumes, volume_mounts)?;
+        let maybe = render_argument(
+            value,
+            config_env,
+            ports,
+            config_vars,
+            volumes,
+            volume_mounts,
+        )?;
         let Some(rendered) = maybe else {
             continue;
         };
@@ -416,9 +431,8 @@ async fn process_deployment_footprint(
                 spec: Some(spec),
                 status: None,
             })?;
-            let mut converted = DynamicObject::deserialize(
-                serde_yaml::Deserializer::from_str(&serialized),
-            )?;
+            let mut converted =
+                DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
             converted.data.assign(
                 Pointer::parse("/spec/template/metadata/creationTimestamp")?,
                 JsonValue::Null,
@@ -444,9 +458,8 @@ async fn process_deployment_footprint(
                     spec: Some(service_spec.clone()),
                     status: None,
                 })?;
-                let converted = DynamicObject::deserialize(
-                    serde_yaml::Deserializer::from_str(&serialized),
-                )?;
+                let converted =
+                    DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
                 let types = converted
                     .types
                     .clone()
