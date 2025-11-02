@@ -4,6 +4,9 @@ use docker_registry::{reference::Reference as RegistryReference, v2::Client as R
 use std::collections::HashMap;
 use std::str::FromStr;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) struct RegistryClients {
     clients: HashMap<String, RegistryClient>,
 }

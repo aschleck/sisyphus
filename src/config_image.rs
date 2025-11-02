@@ -3,7 +3,7 @@ use anyhow::{Result, anyhow};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
-    environment::{GlobalsBuilder, LibraryExtension, Module},
+    environment::{Globals, GlobalsBuilder, LibraryExtension, Module},
     eval::Evaluator,
     starlark_module,
     syntax::{AstModule, Dialect},
@@ -13,6 +13,9 @@ use starlark::{
     },
 };
 use std::{collections::BTreeMap, convert::TryInto, fmt, path::Path};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Deserialize, Debug)]
 pub(crate) struct ConfigImageIndex {
@@ -307,19 +310,7 @@ pub(crate) async fn get_config(root: &Path) -> Result<(ConfigImageIndex, Applica
         &Dialect::Standard,
     )
     .map_err(|e| anyhow!("Unable to parse config: {:?}", e))?;
-    let globals = GlobalsBuilder::extended_by(&[
-        LibraryExtension::Debug,
-        LibraryExtension::EnumType,
-        LibraryExtension::Filter,
-        LibraryExtension::Json,
-        LibraryExtension::Map,
-        LibraryExtension::Partial,
-        LibraryExtension::Print,
-        LibraryExtension::RecordType,
-        LibraryExtension::StructType,
-    ])
-    .with(starlark_types)
-    .build();
+    let globals = make_starlark_globals();
     let module = Module::new();
     let mut eval: Evaluator = Evaluator::new(&module);
     // Expected to define a main method
@@ -344,6 +335,22 @@ fn function_error(message: impl AsRef<str>) -> starlark::Error {
     return starlark::Error::new_kind(starlark::ErrorKind::Function(anyhow::Error::msg(
         message.as_ref().to_string(),
     )));
+}
+
+fn make_starlark_globals() -> Globals {
+    GlobalsBuilder::extended_by(&[
+        LibraryExtension::Debug,
+        LibraryExtension::EnumType,
+        LibraryExtension::Filter,
+        LibraryExtension::Json,
+        LibraryExtension::Map,
+        LibraryExtension::Partial,
+        LibraryExtension::Print,
+        LibraryExtension::RecordType,
+        LibraryExtension::StructType,
+    ])
+    .with(starlark_types)
+    .build()
 }
 
 fn unpack_map(name: &str, source: Value) -> starlark::Result<BTreeMap<String, ArgumentValues>> {

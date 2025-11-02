@@ -28,6 +28,9 @@ use serde_json::Value as JsonValue;
 use std::{collections::BTreeMap, path::Path};
 use tempfile::TempDir;
 
+#[cfg(test)]
+mod tests;
+
 pub(crate) async fn render_sisyphus_resource(
     object: &SisyphusResource,
     allow_any_namespace: bool,
