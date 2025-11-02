@@ -141,11 +141,12 @@ file from the last section. An example `index.json` file is shown below.
 }
 ```
 
-### Deploying with `Deployment`
+### Deploying with `Deployment` or `CronJob`
 
 Once your images are built and pushed, you define your Kubernetes deployment using a
-`Deployment` resource in a Sisyphus YAML file. This object's `image` property references
-your config image and `variables` assigns values to the variables define in your Starlark file.
+`Deployment` or `CronJob` resource in a Sisyphus YAML file. These objects' `image` property
+references your config image and `variables` assigns values to the variables defined in your
+Starlark file.
 
 ````yaml
 # filepath: example/production/echo/index.yaml
@@ -173,8 +174,25 @@ footprint: # Per-cluster sizing. These cluster IDs are contexts defined in kubec
     replicas: 1
 ````
 
-Note that this object does not define a namespace. Because the path is `echo/index.yaml`
+Note that these objects do not define a namespace. Because the path is `echo/index.yaml`
 Sisyphus automatically assigns the namespace `echo` to all objects in that folder.
+
+`CronJob` resources work similarly to `Deployment` but require a `schedule` field instead of
+`replicas` in the footprint:
+
+````yaml
+apiVersion: sisyphus/v1
+kind: CronJob
+metadata:
+  name: echo-cleanup
+config:
+  env: prod
+  image: us-docker.pkg.dev/acme/containers/echo_job_config:latest
+  schedule: "0 2 * * *"  # Run daily at 2 AM
+footprint:
+  gke_acme_us-central1_ap-us-central1: {}
+  gke_acme_us-west4_ap-us-west4: {}
+````
 
 ### Deploying with `KubernetesYaml`
 
@@ -218,13 +236,80 @@ stringData:
 
 Sisyphus treats secrets specially: refreshing resources will never download the secret values and pushing will never override secret values. This allows you to commit values like `replace-me` in code and then use kubectl to set your secrets in the cluster without fear of them leaking via Sisyphus.
 
+## Running locally for development
+
+While developing, you may want to run an built config or run an image locally. Sisyphus provides two
+commands for this:
+
+### Running with a local binary (`app run-config`)
+
+If you have a local binary, you can use `app run-config` to run it with configuration from a local
+Starlark file. This resolves arguments and environment variables for your chosen environment
+(defaulting to `dev`):
+
+````bash
+sisyphus app run-config \
+    --config example/echo/frontend.star \
+    --binary bazel-bin/echo/echo \
+    --environment dev
+````
+
+Variables are resolved from environment variables. For `StringVariable` and `FileVariable`,
+Sisyphus looks for an environment variable with the same name (converted to UPPER_SNAKE_CASE).
+For example, `StringVariable("secret-token")` reads from `SECRET_TOKEN` and
+`FileVariable(name="google-credentials", ...)` reads the file path from `GOOGLE_CREDENTIALS`.
+
+Ports can also be overridden via environment variables. A `Port(name="http", number=8080)`
+will check for `PORT_HTTP` first, falling back to `8080` if not set.
+
+````bash
+export SECRET_TOKEN="my-dev-token"
+export GOOGLE_CREDENTIALS="/path/to/local/creds.json"
+export PORT_HTTP=9090  # Override the default port
+
+sisyphus app run-config \
+    --config example/echo/frontend.star \
+    --binary bazel-bin/echo/echo
+````
+
+### Running with a container image (`app run-image`)
+
+If you've already built and pushed your config image, you can run it locally using Podman:
+
+````bash
+sisyphus app run-image \
+    --image us-docker.pkg.dev/acme/containers/echo_config:latest \
+    --environment dev
+````
+
+This downloads the config image, extracts the binary image reference and configuration, and
+runs the binary container with Podman. Environment variables work the same as `run-config`,
+but `FileVariable` paths are automatically mounted into the container using Podman's volume
+support.
+
+````bash
+export SECRET_TOKEN="my-dev-token"
+export GOOGLE_CREDENTIALS="/path/to/local/creds.json"
+
+sisyphus app run-image \
+    --image us-docker.pkg.dev/acme/containers/echo_config:latest
+````
+
+This mounts `/path/to/local/creds.json` from your host into the container at the path specified
+in the `FileVariable`.
+
+Both commands propagate the binary's exit code.
+
 ## Running Sisyphus
 
 ### Database setup
 
-Sisyphus requires PostgreSQL, MySQL, or Sqlite. If you're using PostgreSQL, you can run
-`20250326020918_initialize.sql` directly. For other databases, just run the `CREATE TABLE`
-statement.
+For cluster management commands (`push`, `refresh`, `forget`, `import`), Sisyphus requires
+PostgreSQL, MySQL, or Sqlite to track the state of deployed resources. The local development
+commands (`app run-config` and `app run-image`) do not require a database.
+
+If you're using PostgreSQL, you can run `20250326020918_initialize.sql` directly. For other
+databases, just run the `CREATE TABLE` statement.
 
 ### Deploying your configuration
 
@@ -232,9 +317,8 @@ To apply your configurations, use the `push` command. You'll need to specify you
 the directory containing your Sisyphus resource definitions.
 
 ````bash
-sisyphus \
+sisyphus push \
     --database-url 'postgres://user:password@some.server/sisyphus' \
-    push \
     --monitor-directory './production'
 ````
 
@@ -244,9 +328,8 @@ If you consent to pushing the changes, they will be applied to your clusters.
 You can also use `refresh` to synchronize the database with the current state of your clusters.
 
 ````bash
-sisyphus \
-    --database-url 'postgres://user:password@some.server/sisyphus' \
-    refresh
+sisyphus refresh \
+    --database-url 'postgres://user:password@some.server/sisyphus'
 ````
 
 # Sharp edges
@@ -266,8 +349,8 @@ sisyphus \
 # What's missing
 
 * [x] Support for Kubernetes cronjobs
-* [ ] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
-* [ ] `sisyphus run image`: run a config image in an environment and allow specifying the variables
+* [x] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
+* [x] `sisyphus run image`: run a config image in an environment and allow specifying the variables
 * [ ] Safe namespace deletions
 * [ ] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse

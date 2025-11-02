@@ -1,4 +1,4 @@
-use crate::kubernetes::{KubernetesKey, KubernetesResources};
+use crate::kubernetes_io::{KubernetesKey, KubernetesResources};
 use anyhow::{anyhow, bail, Result};
 use console::{style, Style};
 use kube::api::DynamicObject;

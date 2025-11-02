@@ -2,7 +2,7 @@ import http from 'node:http';
 import process from 'node:process';
 import url from 'node:url';
 
-const PORT = parseInt(checkExists(process.env.PORT, 'Must specify PORT env var'), 10);
+const PORT = parseInt(checkExists(process.env.PORT_HTTP, 'Must specify PORT_HTTP env var'), 10);
 
 http.createServer((request, response) => {
   const uri = url.parse(request.url).pathname;

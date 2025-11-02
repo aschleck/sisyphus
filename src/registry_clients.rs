@@ -1,6 +1,9 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use docker_credential::{self, CredentialRetrievalError, DockerCredential};
-use docker_registry::{reference::Reference as RegistryReference, v2::Client as RegistryClient};
+use docker_registry::{
+    reference::{Reference as RegistryReference, Version as RegistryVersion},
+    v2::Client as RegistryClient,
+};
 use std::collections::HashMap;
 use std::str::FromStr;
 
@@ -72,4 +75,23 @@ impl RegistryClients {
             .get_mut(registry)
             .ok_or_else(|| anyhow!("Unable to get client"))
     }
+}
+
+pub(crate) async fn resolve_image_tag(
+    image: &String,
+    registries: &mut RegistryClients,
+) -> Result<RegistryReference> {
+    let (image, registry) = registries.get_reference_and_registry(image).await?;
+    let manifest = registry
+        .get_manifest(image.repository().as_ref(), image.version().as_ref())
+        .await
+        .with_context(|| format!("while resolving {}", image))?;
+    let digests = manifest.layers_digests(None)?;
+    Ok(RegistryReference::new(
+        Some(image.registry()),
+        image.repository(),
+        Some(RegistryVersion::from_str(
+            format!("@{}", digests[0]).as_ref(),
+        )?),
+    ))
 }

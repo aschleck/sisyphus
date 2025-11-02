@@ -2,7 +2,7 @@ use crate::{
     config_image::{
         get_config, Application, Argument, ArgumentValues, ConfigImageIndex, FileVariable,
     },
-    kubernetes::KubernetesKey,
+    kubernetes_io::KubernetesKey,
     registry_clients::RegistryClients,
     sisyphus_yaml::{DeploymentServiceConfig, SisyphusResource, VariableSource},
 };
@@ -45,7 +45,7 @@ pub(crate) async fn render_sisyphus_resource(
     match object {
         SisyphusResource::KubernetesYaml(v) => {
             handle_kubernetes_yaml_resource(v, allow_any_namespace, maybe_namespace, by_key)?;
-        },
+        }
         SisyphusResource::SisyphusCronJob(v) => {
             let (index, application) = prepare_image_config(&v.config.image, registries).await?;
 
@@ -71,8 +71,15 @@ pub(crate) async fn render_sisyphus_resource(
                 .as_ref()
                 .ok_or_else(|| anyhow!("Namespace must be explicit"))?;
 
-            process_cronjob_footprint(v, &metadata, &v.config.schedule, &pod_spec, namespace, by_key)?;
-        },
+            process_cronjob_footprint(
+                v,
+                &metadata,
+                &v.config.schedule,
+                &pod_spec,
+                namespace,
+                by_key,
+            )?;
+        }
         SisyphusResource::SisyphusDeployment(v) => {
             let (index, application) = prepare_image_config(&v.config.image, registries).await?;
 
@@ -112,10 +119,10 @@ pub(crate) async fn render_sisyphus_resource(
                 namespace,
                 by_key,
             )?;
-        },
+        }
         SisyphusResource::SisyphusYaml(_) => {
             unreachable!("These should already have been resolved")
-        },
+        }
     };
     Ok(())
 }
@@ -153,7 +160,7 @@ fn handle_kubernetes_yaml_resource(
     Ok(())
 }
 
-async fn prepare_image_config(
+pub(crate) async fn prepare_image_config(
     image_config: &String,
     registries: &mut RegistryClients,
 ) -> Result<(ConfigImageIndex, Application)> {

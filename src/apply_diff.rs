@@ -4,7 +4,7 @@ use sqlx::AnyPool;
 
 use crate::{
     generate_diff::DiffAction,
-    kubernetes::{
+    kubernetes_io::{
         get_kubernetes_api, get_kubernetes_clients, KubernetesKey, KubernetesResources, MANAGER,
     },
 };

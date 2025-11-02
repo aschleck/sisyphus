@@ -56,18 +56,12 @@ fn test_process_cronjob_footprint() -> Result<()> {
     assert_eq!(by_key.len(), 2);
 
     // Verify both clusters have their CronJobs
-    let cluster1_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.cluster == "cluster1")
-        .collect();
+    let cluster1_keys: Vec<_> = by_key.keys().filter(|k| k.cluster == "cluster1").collect();
     assert_eq!(cluster1_keys.len(), 1);
     assert_eq!(cluster1_keys[0].kind, "CronJob");
     assert_eq!(cluster1_keys[0].api_version, "batch/v1");
 
-    let cluster2_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.cluster == "cluster2")
-        .collect();
+    let cluster2_keys: Vec<_> = by_key.keys().filter(|k| k.cluster == "cluster2").collect();
     assert_eq!(cluster2_keys.len(), 1);
     assert_eq!(cluster2_keys[0].kind, "CronJob");
 
@@ -141,7 +135,9 @@ fn test_cronjob_spec_structure() -> Result<()> {
 
 #[test]
 fn test_process_deployment_footprint() -> Result<()> {
-    use crate::sisyphus_yaml::{DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment};
+    use crate::sisyphus_yaml::{
+        DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment,
+    };
 
     let deployment = SisyphusDeployment {
         api_version: "sisyphus/v1".to_string(),
@@ -157,8 +153,14 @@ fn test_process_deployment_footprint() -> Result<()> {
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([
-            ("cluster1".to_string(), DeploymentFootprintEntry { replicas: 3 }),
-            ("cluster2".to_string(), DeploymentFootprintEntry { replicas: 5 }),
+            (
+                "cluster1".to_string(),
+                DeploymentFootprintEntry { replicas: 3 },
+            ),
+            (
+                "cluster2".to_string(),
+                DeploymentFootprintEntry { replicas: 5 },
+            ),
         ]),
     };
 
@@ -190,10 +192,7 @@ fn test_process_deployment_footprint() -> Result<()> {
     assert_eq!(by_key.len(), 2);
 
     // Verify cluster1 has correct replicas
-    let cluster1_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.cluster == "cluster1")
-        .collect();
+    let cluster1_keys: Vec<_> = by_key.keys().filter(|k| k.cluster == "cluster1").collect();
     assert_eq!(cluster1_keys.len(), 1);
     assert_eq!(cluster1_keys[0].kind, "Deployment");
     assert_eq!(cluster1_keys[0].api_version, "apps/v1");
@@ -208,10 +207,7 @@ fn test_process_deployment_footprint() -> Result<()> {
     assert_eq!(cluster1_replicas, 3);
 
     // Verify cluster2 has correct replicas
-    let cluster2_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.cluster == "cluster2")
-        .collect();
+    let cluster2_keys: Vec<_> = by_key.keys().filter(|k| k.cluster == "cluster2").collect();
     assert_eq!(cluster2_keys.len(), 1);
     assert_eq!(cluster2_keys[0].kind, "Deployment");
 
@@ -229,7 +225,9 @@ fn test_process_deployment_footprint() -> Result<()> {
 
 #[test]
 fn test_process_deployment_footprint_with_service() -> Result<()> {
-    use crate::sisyphus_yaml::{DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment};
+    use crate::sisyphus_yaml::{
+        DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment,
+    };
 
     let deployment = SisyphusDeployment {
         api_version: "sisyphus/v1".to_string(),
@@ -244,9 +242,10 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
             service: None,
             variables: BTreeMap::new(),
         },
-        footprint: BTreeMap::from([
-            ("cluster1".to_string(), DeploymentFootprintEntry { replicas: 2 }),
-        ]),
+        footprint: BTreeMap::from([(
+            "cluster1".to_string(),
+            DeploymentFootprintEntry { replicas: 2 },
+        )]),
     };
 
     let metadata = ObjectMeta {
@@ -282,17 +281,11 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
     assert_eq!(by_key.len(), 2);
 
     // Verify Deployment exists
-    let deployment_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.kind == "Deployment")
-        .collect();
+    let deployment_keys: Vec<_> = by_key.keys().filter(|k| k.kind == "Deployment").collect();
     assert_eq!(deployment_keys.len(), 1);
 
     // Verify Service exists
-    let service_keys: Vec<_> = by_key
-        .keys()
-        .filter(|k| k.kind == "Service")
-        .collect();
+    let service_keys: Vec<_> = by_key.keys().filter(|k| k.kind == "Service").collect();
     assert_eq!(service_keys.len(), 1);
     assert_eq!(service_keys[0].api_version, "v1");
 
@@ -591,4 +584,3 @@ fn test_render_argument_varying_not_found() -> Result<()> {
     assert!(result.is_none());
     Ok(())
 }
-

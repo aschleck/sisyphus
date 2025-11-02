@@ -23,4 +23,4 @@ similar = "2.7.0"
 sqlx = { version = "0.8.3", features = ["any", "mysql", "postgres", "runtime-tokio", "sqlite", "time", "tls-native-tls"] }
 starlark = "0.13.0"
 tempfile = "3.23.0"
-tokio = { version = "1.44.1", features = ["macros"] }
+tokio = { version = "1.44.1", features = ["macros", "process"] }

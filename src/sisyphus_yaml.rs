@@ -170,4 +170,3 @@ pub struct KubernetesSecretKeyRef {
     pub name: String,
     pub key: String,
 }
-

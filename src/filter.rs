@@ -1,4 +1,4 @@
-use crate::kubernetes::KubernetesKey;
+use crate::kubernetes_io::KubernetesKey;
 use clap::Args;
 
 #[derive(Args, Debug)]

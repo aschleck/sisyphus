@@ -1,28 +1,32 @@
+mod app_run_config;
+mod app_run_image;
 mod apply_diff;
 mod config_image;
 mod filter;
 mod generate_diff;
-mod kubernetes;
+mod kubernetes_io;
+mod kubernetes_rendering;
 mod registry_clients;
-mod rendering;
 mod sisyphus_yaml;
+mod starlark;
 
 use crate::{
+    app_run_config::{run_config, RunConfigArgs},
+    app_run_image::{run_image, RunImageArgs},
     apply_diff::{apply_diff, namespace_or_default},
     filter::{key_matches_filter, PartialKey},
     generate_diff::{generate_diff, print_diff, DiffAction},
-    kubernetes::{
+    kubernetes_io::{
         get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
         KubernetesResources, MANAGER,
     },
-    registry_clients::RegistryClients,
-    rendering::render_sisyphus_resource,
+    kubernetes_rendering::render_sisyphus_resource,
+    registry_clients::{resolve_image_tag, RegistryClients},
     sisyphus_yaml::{HasConfigImage, HasKind, SisyphusResource},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
 use console::style;
-use docker_registry::reference::{Reference as RegistryReference, Version as RegistryVersion};
 use indicatif::{ProgressBar, ProgressStyle};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
@@ -38,7 +42,6 @@ use std::{
     fs::{self, File},
     io::Write,
     path::Path,
-    str::FromStr,
 };
 
 #[derive(Parser, Debug)]
@@ -46,9 +49,6 @@ use std::{
 struct SisyphusArgs {
     #[command(subcommand)]
     command: Commands,
-
-    #[arg(long, env = "DATABASE_URL")]
-    database_url: String,
 }
 
 #[derive(Args, Debug)]
@@ -83,15 +83,28 @@ impl Into<KubernetesKey> for FullKey {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    App {
+        #[command(subcommand)]
+        app_command: AppCommands,
+    },
     Forget {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+
         #[command(flatten)]
         key: FullKey,
     },
     Import {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+
         #[command(flatten)]
         key: FullKey,
     },
     Push {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+
         // The filters to consider
         #[command(flatten)]
         filter: PartialKey,
@@ -104,25 +117,56 @@ enum Commands {
         #[arg(long, env = "MONITOR_DIRECTORY")]
         monitor_directory: String,
     },
-    Refresh,
+    Refresh {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppCommands {
+    RunConfig {
+        #[command(flatten)]
+        args: RunConfigArgs,
+    },
+    RunImage {
+        #[command(flatten)]
+        args: RunImageArgs,
+    },
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<()> {
     env_logger::init();
     sqlx::any::install_default_drivers();
-    let args = SisyphusArgs::parse();
-    let pool = AnyPool::connect(&args.database_url).await?;
 
+    let args = SisyphusArgs::parse();
     match args.command {
-        Commands::Forget { key } => forget(key.into(), &pool).await?,
-        Commands::Import { key } => import(key.into(), &pool).await?,
+        Commands::App { app_command } => match app_command {
+            AppCommands::RunConfig { args } => run_config(args).await?,
+            AppCommands::RunImage { args } => run_image(args).await?,
+        },
+        Commands::Forget { database_url, key } => {
+            let pool = AnyPool::connect(&database_url).await?;
+            forget(key.into(), &pool).await?
+        }
+        Commands::Import { database_url, key } => {
+            let pool = AnyPool::connect(&database_url).await?;
+            import(key.into(), &pool).await?
+        }
         Commands::Push {
+            database_url,
             filter,
             label_namespace,
             monitor_directory,
-        } => push(&filter, &label_namespace, &monitor_directory, &pool).await?,
-        Commands::Refresh => refresh(&pool).await?,
+        } => {
+            let pool = AnyPool::connect(&database_url).await?;
+            push(&filter, &label_namespace, &monitor_directory, &pool).await?
+        }
+        Commands::Refresh { database_url } => {
+            let pool = AnyPool::connect(&database_url).await?;
+            refresh(&pool).await?
+        }
     };
     Ok(())
 }
@@ -681,12 +725,14 @@ async fn render_sisyphus_resources(
     for (key, object) in objects {
         let mut copy = object.clone();
         match &mut copy {
-            SisyphusResource::KubernetesYaml(_) => {},
-            SisyphusResource::SisyphusCronJob(v) =>
-                resolve_sisyphus_config_image(v, registries).await?,
-            SisyphusResource::SisyphusDeployment(v) =>
-                resolve_sisyphus_config_image(v, registries).await?,
-            SisyphusResource::SisyphusYaml(_) => {},
+            SisyphusResource::KubernetesYaml(_) => {}
+            SisyphusResource::SisyphusCronJob(v) => {
+                resolve_sisyphus_config_image(v, registries).await?
+            }
+            SisyphusResource::SisyphusDeployment(v) => {
+                resolve_sisyphus_config_image(v, registries).await?
+            }
+            SisyphusResource::SisyphusYaml(_) => {}
         };
 
         render_sisyphus_resource(
@@ -707,23 +753,8 @@ async fn resolve_sisyphus_config_image(
     object: &mut impl HasConfigImage,
     registries: &mut RegistryClients,
 ) -> Result<()> {
-    let (image, registry) = registries
-        .get_reference_and_registry(&object.config_image())
-        .await?;
-    let manifest = registry
-        .get_manifest(image.repository().as_ref(), image.version().as_ref())
-        .await
-        .with_context(|| format!("while resolving {}", object.config_image()))?;
-    let digests = manifest.layers_digests(None)?;
-    object.set_config_image(
-        RegistryReference::new(
-            Some(image.registry()),
-            image.repository(),
-            Some(RegistryVersion::from_str(
-                format!("@{}", digests[0]).as_ref(),
-            )?),
-        )
-        .to_string());
+    let reference = resolve_image_tag(object.config_image(), registries).await?;
+    object.set_config_image(reference.to_string());
     Ok(())
 }
 

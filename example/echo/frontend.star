@@ -14,7 +14,7 @@ def main(ctx):
             "GOOGLE_APPLICATION_CREDENTIALS": (
                 FileVariable(name="google-credentials", path="/etc/google/credentials.json")
             ),
-            "HTTP_PORT": {
+            "PORT_HTTP": {
                 "prod": Port(name="http", number=80),
                 "test": Port(name="http", number=80),
                 "dev": Port(name="http", number=8080, protocol="TCP"),  # protocol defaults to TCP

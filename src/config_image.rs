@@ -3,10 +3,9 @@ use anyhow::{anyhow, Result};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
-    environment::{Globals, GlobalsBuilder, LibraryExtension, Module},
+    environment::{Globals, GlobalsBuilder, LibraryExtension},
     eval::Evaluator,
     starlark_module,
-    syntax::{AstModule, Dialect},
     values::{
         dict::UnpackDictEntries, float::StarlarkFloat, list_or_tuple::UnpackListOrTuple,
         starlark_value, NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike,
@@ -304,30 +303,8 @@ pub(crate) async fn get_config(root: &Path) -> Result<(ConfigImageIndex, Applica
     let index_path = root.join("index.json");
     let index: ConfigImageIndex =
         serde_json::from_str(&tokio::fs::read_to_string(index_path).await?)?;
-    let ast = AstModule::parse(
-        &index.config_entrypoint,
-        tokio::fs::read_to_string(root.join(&index.config_entrypoint)).await?,
-        &Dialect::Standard,
-    )
-    .map_err(|e| anyhow!("Unable to parse config: {:?}", e))?;
-    let globals = make_starlark_globals();
-    let module = Module::new();
-    let mut eval: Evaluator = Evaluator::new(&module);
-    // Expected to define a main method
-    eval.eval_module(ast, &globals)
-        .map_err(|e| anyhow!("Cannot load config: {:?}", e))?;
-    // Get the main method
-    let main = AstModule::parse("", "main".to_string(), &Dialect::Standard)
-        .map(|a| eval.eval_module(a, &globals))
-        .flatten()
-        .map_err(|e| anyhow!("No main function: {:?}", e))?;
-    let result = eval
-        .eval_function(main, &[Value::new_none()], &[])
-        .map_err(|e| anyhow!("Cannot evaluate config: {:?}", e))?;
-    let application = result
-        .downcast_ref::<Application>()
-        .ok_or_else(|| anyhow!("Config didn't return an Application"))?
-        .clone();
+    let config_path = root.join(&index.config_entrypoint);
+    let application = crate::starlark::load_starlark_config(&config_path).await?;
     Ok((index, application))
 }
 
@@ -337,7 +314,7 @@ fn function_error(message: impl AsRef<str>) -> starlark::Error {
     )));
 }
 
-fn make_starlark_globals() -> Globals {
+pub(crate) fn make_starlark_globals() -> Globals {
     GlobalsBuilder::extended_by(&[
         LibraryExtension::Debug,
         LibraryExtension::EnumType,
