@@ -11,6 +11,9 @@ use std::{
     fmt,
 };
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct KubernetesKey {
     pub name: String,
