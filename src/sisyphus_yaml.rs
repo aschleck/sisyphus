@@ -6,6 +6,8 @@ use std::collections::BTreeMap;
 #[serde(tag = "kind")]
 pub enum SisyphusResource {
     KubernetesYaml(KubernetesYaml),
+    #[serde(rename = "CronJob")]
+    SisyphusCronJob(SisyphusCronJob),
     #[serde(rename = "Deployment")]
     SisyphusDeployment(SisyphusDeployment),
     SisyphusYaml(SisyphusYaml),
@@ -13,6 +15,11 @@ pub enum SisyphusResource {
 
 pub trait HasKind {
     fn kind(&self) -> &'static str;
+}
+
+pub trait HasConfigImage {
+    fn config_image<'a>(&'a self) -> &'a String;
+    fn set_config_image(&mut self, image: String) -> ();
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -35,11 +42,46 @@ impl HasKind for KubernetesYaml {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SisyphusCronJob {
+    pub api_version: String,
+    pub metadata: Metadata,
+    pub config: CronJobConfig,
+    pub footprint: BTreeMap<String, CronJobFootprintEntry>,
+}
+
+impl HasConfigImage for SisyphusCronJob {
+    fn config_image<'a>(&'a self) -> &'a String {
+        &self.config.image
+    }
+
+    fn set_config_image(&mut self, image: String) -> () {
+        self.config.image = image
+    }
+}
+
+impl HasKind for SisyphusCronJob {
+    fn kind(&self) -> &'static str {
+        "SisyphusCronJob"
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SisyphusDeployment {
     pub api_version: String,
     pub metadata: Metadata,
     pub config: DeploymentConfig,
-    pub footprint: BTreeMap<String, FootprintEntry>,
+    pub footprint: BTreeMap<String, DeploymentFootprintEntry>,
+}
+
+impl HasConfigImage for SisyphusDeployment {
+    fn config_image<'a>(&'a self) -> &'a String {
+        &self.config.image
+    }
+
+    fn set_config_image(&mut self, image: String) -> () {
+        self.config.image = image
+    }
 }
 
 impl HasKind for SisyphusDeployment {
@@ -75,11 +117,32 @@ pub struct Metadata {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CronJobConfig {
+    pub env: String,
+    pub image: String,
+    pub schedule: String,
+    #[serde(default)]
+    pub variables: BTreeMap<String, VariableSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CronJobFootprintEntry {}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct DeploymentConfig {
     pub env: String,
     pub image: String,
     pub service: Option<DeploymentServiceConfig>,
+    #[serde(default)]
     pub variables: BTreeMap<String, VariableSource>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DeploymentFootprintEntry {
+    pub replicas: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -108,8 +171,3 @@ pub struct KubernetesSecretKeyRef {
     pub key: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct FootprintEntry {
-    pub replicas: i32,
-}

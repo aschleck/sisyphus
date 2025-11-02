@@ -3,6 +3,303 @@ use crate::config_image::{Port, Protocol};
 use crate::sisyphus_yaml::ServicePort as SisyphusServicePort;
 
 #[test]
+fn test_process_cronjob_footprint() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: CronJobConfig {
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            schedule: "0 0 * * *".to_string(),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([
+            ("cluster1".to_string(), CronJobFootprintEntry {}),
+            ("cluster2".to_string(), CronJobFootprintEntry {}),
+        ]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        labels: Some(BTreeMap::from([(
+            "app".to_string(),
+            "test-cronjob".to_string(),
+        )])),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    container.image = Some("test-image:latest".to_string());
+
+    let pod_spec = build_pod_spec(container, Vec::new());
+
+    let mut by_key = BTreeMap::new();
+
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        "0 0 * * *",
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    // Verify two CronJobs were created (one per cluster)
+    assert_eq!(by_key.len(), 2);
+
+    // Verify both clusters have their CronJobs
+    let cluster1_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.cluster == "cluster1")
+        .collect();
+    assert_eq!(cluster1_keys.len(), 1);
+    assert_eq!(cluster1_keys[0].kind, "CronJob");
+    assert_eq!(cluster1_keys[0].api_version, "batch/v1");
+
+    let cluster2_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.cluster == "cluster2")
+        .collect();
+    assert_eq!(cluster2_keys.len(), 1);
+    assert_eq!(cluster2_keys[0].kind, "CronJob");
+
+    Ok(())
+}
+
+#[test]
+fn test_cronjob_spec_structure() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: CronJobConfig {
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            schedule: "*/5 * * * *".to_string(),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    container.image = Some("test-image:latest".to_string());
+
+    let pod_spec = build_pod_spec(container, Vec::new());
+
+    let mut by_key = BTreeMap::new();
+
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        "*/5 * * * *",
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    // Get the created CronJob
+    let cronjob_obj = by_key.values().next().unwrap();
+
+    // Verify the schedule is set correctly
+    let spec = cronjob_obj.data.get("spec").unwrap();
+    let schedule = spec.get("schedule").unwrap().as_str().unwrap();
+    assert_eq!(schedule, "*/5 * * * *");
+
+    // Verify jobTemplate structure exists
+    assert!(spec.get("jobTemplate").is_some());
+    let job_template = spec.get("jobTemplate").unwrap();
+    assert!(job_template.get("spec").is_some());
+
+    // Verify pod template structure
+    let job_spec = job_template.get("spec").unwrap();
+    assert!(job_spec.get("template").is_some());
+    let pod_template = job_spec.get("template").unwrap();
+    assert!(pod_template.get("spec").is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_process_deployment_footprint() -> Result<()> {
+    use crate::sisyphus_yaml::{DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment};
+
+    let deployment = SisyphusDeployment {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-deployment".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: DeploymentConfig {
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            service: None,
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([
+            ("cluster1".to_string(), DeploymentFootprintEntry { replicas: 3 }),
+            ("cluster2".to_string(), DeploymentFootprintEntry { replicas: 5 }),
+        ]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-deployment".to_string()),
+        namespace: Some("default".to_string()),
+        labels: Some(BTreeMap::from([(
+            "app".to_string(),
+            "test-deployment".to_string(),
+        )])),
+        ..Default::default()
+    };
+
+    let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
+    let deployment_spec = build_base_deployment_spec(labels);
+
+    let mut by_key = BTreeMap::new();
+
+    process_deployment_footprint(
+        &deployment,
+        &metadata,
+        &deployment_spec,
+        &None,
+        "default",
+        &mut by_key,
+    )?;
+
+    // Verify two Deployments were created (one per cluster)
+    assert_eq!(by_key.len(), 2);
+
+    // Verify cluster1 has correct replicas
+    let cluster1_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.cluster == "cluster1")
+        .collect();
+    assert_eq!(cluster1_keys.len(), 1);
+    assert_eq!(cluster1_keys[0].kind, "Deployment");
+    assert_eq!(cluster1_keys[0].api_version, "apps/v1");
+
+    let cluster1_obj = by_key.get(cluster1_keys[0]).unwrap();
+    let cluster1_replicas = cluster1_obj
+        .data
+        .get("spec")
+        .and_then(|s| s.get("replicas"))
+        .and_then(|r| r.as_i64())
+        .unwrap();
+    assert_eq!(cluster1_replicas, 3);
+
+    // Verify cluster2 has correct replicas
+    let cluster2_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.cluster == "cluster2")
+        .collect();
+    assert_eq!(cluster2_keys.len(), 1);
+    assert_eq!(cluster2_keys[0].kind, "Deployment");
+
+    let cluster2_obj = by_key.get(cluster2_keys[0]).unwrap();
+    let cluster2_replicas = cluster2_obj
+        .data
+        .get("spec")
+        .and_then(|s| s.get("replicas"))
+        .and_then(|r| r.as_i64())
+        .unwrap();
+    assert_eq!(cluster2_replicas, 5);
+
+    Ok(())
+}
+
+#[test]
+fn test_process_deployment_footprint_with_service() -> Result<()> {
+    use crate::sisyphus_yaml::{DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment};
+
+    let deployment = SisyphusDeployment {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-deployment".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: DeploymentConfig {
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            service: None,
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([
+            ("cluster1".to_string(), DeploymentFootprintEntry { replicas: 2 }),
+        ]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-deployment".to_string()),
+        namespace: Some("default".to_string()),
+        ..Default::default()
+    };
+
+    let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
+    let deployment_spec = build_base_deployment_spec(labels.clone());
+
+    // Create a service spec
+    let mut service_spec = ServiceSpec::default();
+    service_spec.selector = Some(labels);
+    service_spec.ports = Some(vec![ServicePort {
+        name: Some("http".to_string()),
+        port: 80,
+        ..Default::default()
+    }]);
+
+    let mut by_key = BTreeMap::new();
+
+    process_deployment_footprint(
+        &deployment,
+        &metadata,
+        &deployment_spec,
+        &Some(service_spec),
+        "default",
+        &mut by_key,
+    )?;
+
+    // Verify both Deployment and Service were created
+    assert_eq!(by_key.len(), 2);
+
+    // Verify Deployment exists
+    let deployment_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.kind == "Deployment")
+        .collect();
+    assert_eq!(deployment_keys.len(), 1);
+
+    // Verify Service exists
+    let service_keys: Vec<_> = by_key
+        .keys()
+        .filter(|k| k.kind == "Service")
+        .collect();
+    assert_eq!(service_keys.len(), 1);
+    assert_eq!(service_keys[0].api_version, "v1");
+
+    Ok(())
+}
+
+#[test]
 fn test_build_base_deployment_spec() {
     let labels = BTreeMap::from([
         ("app".to_string(), "test-app".to_string()),
@@ -294,3 +591,4 @@ fn test_render_argument_varying_not_found() -> Result<()> {
     assert!(result.is_none());
     Ok(())
 }
+

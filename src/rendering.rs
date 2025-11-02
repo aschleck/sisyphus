@@ -13,10 +13,11 @@ use json_patch::jsonptr::{Assign, Pointer};
 use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
+        batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
             Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, PodSecurityContext, PodSpec,
-            ResourceRequirements, SecretKeySelector, SecretVolumeSource, Service, ServicePort,
-            ServiceSpec, Volume, VolumeMount,
+            PodTemplateSpec, ResourceRequirements, SecretKeySelector, SecretVolumeSource, Service,
+            ServicePort, ServiceSpec, Volume, VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -44,7 +45,34 @@ pub(crate) async fn render_sisyphus_resource(
     match object {
         SisyphusResource::KubernetesYaml(v) => {
             handle_kubernetes_yaml_resource(v, allow_any_namespace, maybe_namespace, by_key)?;
-        }
+        },
+        SisyphusResource::SisyphusCronJob(v) => {
+            let (index, application) = prepare_image_config(&v.config.image, registries).await?;
+
+            let metadata = render_deployment_metadata(
+                &v.metadata.name,
+                label_namespace,
+                &v.metadata.labels,
+                &v.metadata.annotations,
+                maybe_namespace,
+            )?;
+
+            let (container, _, volumes) = build_container_config(
+                &v.metadata.name,
+                &index,
+                &application,
+                &v.config.env,
+                &v.config.variables,
+            )?;
+
+            let pod_spec = build_pod_spec(container, volumes);
+
+            let namespace = maybe_namespace
+                .as_ref()
+                .ok_or_else(|| anyhow!("Namespace must be explicit"))?;
+
+            process_cronjob_footprint(v, &metadata, &v.config.schedule, &pod_spec, namespace, by_key)?;
+        },
         SisyphusResource::SisyphusDeployment(v) => {
             let (index, application) = prepare_image_config(&v.config.image, registries).await?;
 
@@ -83,12 +111,11 @@ pub(crate) async fn render_sisyphus_resource(
                 &service_spec_option,
                 namespace,
                 by_key,
-            )
-            .await?;
-        }
+            )?;
+        },
         SisyphusResource::SisyphusYaml(_) => {
             unreachable!("These should already have been resolved")
-        }
+        },
     };
     Ok(())
 }
@@ -414,7 +441,62 @@ fn build_service_spec(
     }
 }
 
-async fn process_deployment_footprint(
+fn process_cronjob_footprint(
+    sisyphus_cronjob: &crate::sisyphus_yaml::SisyphusCronJob,
+    metadata: &ObjectMeta,
+    schedule: &str,
+    pod_spec: &PodSpec,
+    namespace: &str,
+    by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
+) -> Result<()> {
+    for (cluster, _) in &sisyphus_cronjob.footprint {
+        let cronjob_spec = CronJobSpec {
+            schedule: schedule.to_string(),
+            job_template: JobTemplateSpec {
+                metadata: None,
+                spec: Some(JobSpec {
+                    template: PodTemplateSpec {
+                        metadata: None,
+                        spec: Some(pod_spec.clone()),
+                    },
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        };
+
+        let serialized = serde_yaml::to_string(&CronJob {
+            metadata: metadata.clone(),
+            spec: Some(cronjob_spec),
+            status: None,
+        })?;
+        let mut converted =
+            DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
+        converted.data.assign(
+            Pointer::parse("/spec/jobTemplate/metadata/creationTimestamp")?,
+            JsonValue::Null,
+        )?;
+        converted.data.assign(
+            Pointer::parse("/spec/jobTemplate/spec/template/metadata/creationTimestamp")?,
+            JsonValue::Null,
+        )?;
+        let types = converted
+            .types
+            .clone()
+            .ok_or_else(|| anyhow!("Object {} is type-free", converted.name_any()))?;
+        let key = KubernetesKey {
+            api_version: types.api_version,
+            cluster: cluster.clone(),
+            kind: types.kind,
+            name: sisyphus_cronjob.metadata.name.clone(),
+            namespace: Some(namespace.to_string()),
+        };
+        by_key.insert(key, converted);
+    }
+    Ok(())
+}
+
+fn process_deployment_footprint(
     sisyphus_deployment: &crate::sisyphus_yaml::SisyphusDeployment,
     metadata: &ObjectMeta,
     independent_spec: &DeploymentSpec,

@@ -17,7 +17,7 @@ use crate::{
     },
     registry_clients::RegistryClients,
     rendering::render_sisyphus_resource,
-    sisyphus_yaml::{HasKind, SisyphusDeployment, SisyphusResource},
+    sisyphus_yaml::{HasConfigImage, HasKind, SisyphusResource},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -654,6 +654,7 @@ fn insert_sisyphus_resource(
 ) -> Result<()> {
     let (api_version, kind, name) = match &object {
         SisyphusResource::KubernetesYaml(v) => (&v.api_version, v.kind(), &v.metadata.name),
+        SisyphusResource::SisyphusCronJob(v) => (&v.api_version, v.kind(), &v.metadata.name),
         SisyphusResource::SisyphusDeployment(v) => (&v.api_version, v.kind(), &v.metadata.name),
         SisyphusResource::SisyphusYaml(_) => unreachable!("These should already have been loaded"),
     };
@@ -680,10 +681,12 @@ async fn render_sisyphus_resources(
     for (key, object) in objects {
         let mut copy = object.clone();
         match &mut copy {
-            SisyphusResource::SisyphusDeployment(v) => {
-                resolve_sisyphus_deployment_image(v, registries).await?;
-            }
-            _ => {}
+            SisyphusResource::KubernetesYaml(_) => {},
+            SisyphusResource::SisyphusCronJob(v) =>
+                resolve_sisyphus_config_image(v, registries).await?,
+            SisyphusResource::SisyphusDeployment(v) =>
+                resolve_sisyphus_config_image(v, registries).await?,
+            SisyphusResource::SisyphusYaml(_) => {},
         };
 
         render_sisyphus_resource(
@@ -700,26 +703,27 @@ async fn render_sisyphus_resources(
     Ok(())
 }
 
-async fn resolve_sisyphus_deployment_image(
-    object: &mut SisyphusDeployment,
+async fn resolve_sisyphus_config_image(
+    object: &mut impl HasConfigImage,
     registries: &mut RegistryClients,
 ) -> Result<()> {
     let (image, registry) = registries
-        .get_reference_and_registry(&object.config.image)
+        .get_reference_and_registry(&object.config_image())
         .await?;
     let manifest = registry
         .get_manifest(image.repository().as_ref(), image.version().as_ref())
         .await
-        .with_context(|| format!("while resolving {}", object.config.image))?;
+        .with_context(|| format!("while resolving {}", object.config_image()))?;
     let digests = manifest.layers_digests(None)?;
-    object.config.image = RegistryReference::new(
-        Some(image.registry()),
-        image.repository(),
-        Some(RegistryVersion::from_str(
-            format!("@{}", digests[0]).as_ref(),
-        )?),
-    )
-    .to_string();
+    object.set_config_image(
+        RegistryReference::new(
+            Some(image.registry()),
+            image.repository(),
+            Some(RegistryVersion::from_str(
+                format!("@{}", digests[0]).as_ref(),
+            )?),
+        )
+        .to_string());
     Ok(())
 }
 

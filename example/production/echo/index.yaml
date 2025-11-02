@@ -54,6 +54,21 @@ clusters:
 ---
 
 apiVersion: sisyphus/v1
+kind: CronJob
+metadata:
+  name: echo-cleanup
+config:
+  env: prod
+  # Not actually defined in //example/echo but it's the same process as the echo server
+  image: us-docker.pkg.dev/acme/containers/echo_job_config:latest
+  schedule: "0 2 * * *"  # Run daily at 2 AM
+footprint:
+  gke_acme_us-central1_ap-us-central1: {}
+  gke_acme_us-west4_ap-us-west4: {}
+
+---
+
+apiVersion: sisyphus/v1
 kind: SisyphusYaml
 metadata:
   name: and-even-more-sisyphus-yaml-files

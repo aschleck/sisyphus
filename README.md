@@ -31,8 +31,8 @@ hardcode specific values like tokens. But, when you run in production or in a st
 you want to use a secret. You can solve this by passing long lists of arguments to the binary when
 developing, and by duplicating lists of arguments with small differences when creating yaml for
 production and staging, but it's extremely error-prone. Sisyphus fixes this by defining "execution
-environments" in the config container. You tell Sisyphus what environment a deployment should run in
-and Sisyphus will resolve the flags accordingly.
+environments" in the config container. You tell Sisyphus what environment a deployment (or cronjob)
+should run in and Sisyphus will resolve the flags accordingly.
 
 Managing a single cluster is trivial but managing multiple clusters often requires use of tools
 like Terraform/Terragrunt and Pulumi. Furthermore, depending on your load requirements, you may want
@@ -265,7 +265,7 @@ sisyphus \
 
 # What's missing
 
-* [ ] Support for Kubernetes cronjobs
+* [x] Support for Kubernetes cronjobs
 * [ ] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
 * [ ] `sisyphus run image`: run a config image in an environment and allow specifying the variables
 * [ ] Safe namespace deletions
