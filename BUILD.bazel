@@ -1,10 +1,10 @@
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
 
 package(default_visibility = ["//visibility:public"])
 
 rust_binary(
     name = "sisyphus",
-    srcs = glob(["src/*.rs"]),
+    srcs = glob(["src/**/*.rs"]),
     deps = [
         "@crates//:allocative",
         "@crates//:anyhow",
@@ -27,6 +27,11 @@ rust_binary(
         "@crates//:tempfile",
         "@crates//:tokio",
     ],
+)
+
+rust_test(
+    name = "tests",
+    crate = "sisyphus",
 )
 
 platform(
