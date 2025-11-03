@@ -238,7 +238,7 @@ Sisyphus treats secrets specially: refreshing resources will never download the 
 
 ## Running locally for development
 
-While developing, you may want to run an built config or run an image locally. Sisyphus provides two
+While developing, you may want to run a built config or run an image locally. Sisyphus provides two
 commands for this:
 
 ### Running with a local binary (`app run-config`)
@@ -283,9 +283,8 @@ sisyphus app run-image \
 ````
 
 This downloads the config image, extracts the binary image reference and configuration, and
-runs the binary container with Podman. Environment variables work the same as `run-config`,
-but `FileVariable` paths are automatically mounted into the container using Podman's volume
-support.
+runs the binary container with Podman. Environment variables work the same as `run-config`, but
+`FileVariable` paths are automatically mounted into the container using Podman's mount support.
 
 ````bash
 export SECRET_TOKEN="my-dev-token"
@@ -338,7 +337,7 @@ sisyphus refresh \
   resources for other namespaces.
 * Sisyphus automatically adopts namespaces and, when all tracked resources are removed, will delete
   them. If you have non-Sisyphus resources then they will be automatically deleted.
-* The secrets support is a bit idiosyncratic. Sisyphus tries to never clobber anything, and never
+* The secrets support is a bit idiosyncratic. Sisyphus tries to never clobber anything and never
   store an actual secret value in its database. If you edit the secret values or add new secret keys
   via another tool, they will be untouched. If you add a new secret key via Sisyphus later, it will
   not clobber any existing values for that key provided it is already aware of the key via a
@@ -351,11 +350,13 @@ sisyphus refresh \
 * [x] Support for Kubernetes cronjobs
 * [x] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
 * [x] `sisyphus run image`: run a config image in an environment and allow specifying the variables
-* [ ] Safe namespace deletions
+* [ ] `sisyphus diff`
+* [ ] Some kind of CD dashboard with the ability to see logs and pause pushes for things? How would
+      groups work?
+* [ ] Safer namespace deletions: check for untracked resources before deleting
 * [ ] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse
 * [x] Resource requests and limits on Sisyphus deployments
-* [ ] Default values for StringVariables so server specs can be overridden when running locally
 * [x] `SisyphusYaml` objects to include more yaml from the index.yaml file
 * [x] Tests
 
