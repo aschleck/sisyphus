@@ -51,6 +51,52 @@ struct SisyphusArgs {
     command: Commands,
 }
 
+#[derive(Debug, Subcommand)]
+enum Commands {
+    App {
+        #[command(subcommand)]
+        app_command: AppCommands,
+    },
+    Diff {
+        #[command(flatten)]
+        args: PushArgs,
+    },
+    Forget {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+
+        #[command(flatten)]
+        key: FullKey,
+    },
+    Import {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+
+        #[command(flatten)]
+        key: FullKey,
+    },
+    Push {
+        #[command(flatten)]
+        args: PushArgs,
+    },
+    Refresh {
+        #[arg(long, env = "DATABASE_URL")]
+        database_url: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AppCommands {
+    RunConfig {
+        #[command(flatten)]
+        args: RunConfigArgs,
+    },
+    RunImage {
+        #[command(flatten)]
+        args: RunImageArgs,
+    },
+}
+
 #[derive(Args, Debug)]
 struct FullKey {
     #[arg(long)]
@@ -81,58 +127,22 @@ impl Into<KubernetesKey> for FullKey {
     }
 }
 
-#[derive(Debug, Subcommand)]
-enum Commands {
-    App {
-        #[command(subcommand)]
-        app_command: AppCommands,
-    },
-    Forget {
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+#[derive(Args, Debug)]
+struct PushArgs {
+    #[arg(long, env = "DATABASE_URL")]
+    database_url: String,
 
-        #[command(flatten)]
-        key: FullKey,
-    },
-    Import {
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+    // The filters to consider
+    #[command(flatten)]
+    filter: PartialKey,
 
-        #[command(flatten)]
-        key: FullKey,
-    },
-    Push {
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
+    // The namespace to label resources with
+    #[arg(long, env = "LABEL_NAMESPACE", default_value = "april.dev")]
+    label_namespace: String,
 
-        // The filters to consider
-        #[command(flatten)]
-        filter: PartialKey,
-
-        // The namespace to label resources with
-        #[arg(long, env = "LABEL_NAMESPACE", default_value = "april.dev")]
-        label_namespace: String,
-
-        // The path to the directory of configuration files to monitor
-        #[arg(long, env = "MONITOR_DIRECTORY")]
-        monitor_directory: String,
-    },
-    Refresh {
-        #[arg(long, env = "DATABASE_URL")]
-        database_url: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum AppCommands {
-    RunConfig {
-        #[command(flatten)]
-        args: RunConfigArgs,
-    },
-    RunImage {
-        #[command(flatten)]
-        args: RunImageArgs,
-    },
+    // The path to the directory of configuration files to monitor
+    #[arg(long, env = "MONITOR_DIRECTORY")]
+    monitor_directory: String,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -146,6 +156,17 @@ async fn main() -> Result<()> {
             AppCommands::RunConfig { args } => run_config(args).await?,
             AppCommands::RunImage { args } => run_image(args).await?,
         },
+        Commands::Diff {
+            args: PushArgs {
+                database_url,
+                filter,
+                label_namespace,
+                monitor_directory,
+            }
+        } => {
+            let pool = AnyPool::connect(&database_url).await?;
+            diff(&filter, &label_namespace, &monitor_directory, &pool).await?;
+        }
         Commands::Forget { database_url, key } => {
             let pool = AnyPool::connect(&database_url).await?;
             forget(key.into(), &pool).await?
@@ -155,10 +176,12 @@ async fn main() -> Result<()> {
             import(key.into(), &pool).await?
         }
         Commands::Push {
-            database_url,
-            filter,
-            label_namespace,
-            monitor_directory,
+            args: PushArgs {
+                database_url,
+                filter,
+                label_namespace,
+                monitor_directory,
+            }
         } => {
             let pool = AnyPool::connect(&database_url).await?;
             push(&filter, &label_namespace, &monitor_directory, &pool).await?
@@ -302,12 +325,12 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
     Ok(())
 }
 
-async fn push(
+async fn diff(
     filter: &PartialKey,
     label_namespace: &str,
     monitor_directory: &str,
     pool: &AnyPool,
-) -> Result<()> {
+) -> Result<Vec<(KubernetesKey, DiffAction)>> {
     let mut registries = RegistryClients::new();
     let mut from_files = KubernetesResources {
         by_key: BTreeMap::new(),
@@ -398,14 +421,24 @@ async fn push(
     let changed = generate_diff(comparable_database, comparable_files)?;
     if changed.len() == 0 {
         println!("Nothing to do");
-        return Ok(());
     }
+    Ok(changed)
+}
 
+async fn push(
+    filter: &PartialKey,
+    label_namespace: &str,
+    monitor_directory: &str,
+    pool: &AnyPool,
+) -> Result<()> {
+    let changed = diff(filter, label_namespace, monitor_directory, pool).await?;
+    if changed.len() == 0 {
+        return Ok(())
+    }
     if !ask_for_user_permission("pushing")? {
         return Ok(());
     }
-
-    apply_diff(changed, &from_database, &from_files, &pool).await?;
+    apply_diff(changed, &pool).await?;
     Ok(())
 }
 

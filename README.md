@@ -350,12 +350,13 @@ sisyphus refresh \
 * [x] Support for Kubernetes cronjobs
 * [x] `sisyphus run config` for dev: run binaries locally and allow specifying the variables
 * [x] `sisyphus run image`: run a config image in an environment and allow specifying the variables
-* [ ] `sisyphus diff`
+* [x] `sisyphus diff`
 * [ ] Some kind of CD dashboard with the ability to see logs and pause pushes for things? How would
       groups work?
 * [ ] Safer namespace deletions: check for untracked resources before deleting
 * [ ] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse
+* [ ] Rework the Starlark configuration so we can pass the cluster inside of ctx
 * [x] Resource requests and limits on Sisyphus deployments
 * [x] `SisyphusYaml` objects to include more yaml from the index.yaml file
 * [x] Tests
