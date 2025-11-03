@@ -1,22 +1,33 @@
-use anyhow::{Context, Result};
-use kube::api::{DeleteParams, DynamicObject, Patch, PatchParams};
+use anyhow::{bail, Context, Result};
+use kube::{api::{DeleteParams, DynamicObject, Patch, PatchParams}, discovery::Scope};
 use sqlx::AnyPool;
 
 use crate::{
     generate_diff::DiffAction,
     kubernetes_io::{
-        get_kubernetes_api, get_kubernetes_clients, KubernetesKey, KubernetesResources, MANAGER,
+        get_kubernetes_api, get_kubernetes_clients, KubernetesKey, MANAGER,
     },
 };
 
 pub(crate) async fn apply_diff(
     changed: Vec<(KubernetesKey, DiffAction)>,
-    have: &KubernetesResources,
-    want: &KubernetesResources,
     pool: &AnyPool,
 ) -> Result<()> {
-    let (clients, types) =
-        get_kubernetes_clients(have.by_key.keys().chain(want.by_key.keys())).await?;
+    let (clients, types) = get_kubernetes_clients(changed.iter().map(|(k, _)| k)).await?;
+    // Check that we don't have any namespace vs resource scope mismatches
+    for (key, _) in &changed {
+        let Some((_, caps)) = types.get(&(key.api_version.clone(), key.kind.clone())) else {
+            bail!("Unable to find Kubernetes type for key {:?}", key);
+        };
+        match (&caps.scope, &key.namespace) {
+            (Scope::Cluster, None) => {},
+            (Scope::Cluster, Some(_)) =>
+                bail!("Creating a cluster-scoped resource with a namespace will fail"),
+            (Scope::Namespaced, Some(_)) => {},
+            (Scope::Namespaced, None) =>
+                bail!("Creating a namespaced-scoped resource without a namespace is disallowed"),
+        }
+    }
     for (key, action) in changed {
         let api = get_kubernetes_api(&key, &clients, &types)?;
         apply_single_diff(action, &key, &api, pool).await?;

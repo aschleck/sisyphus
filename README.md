@@ -354,7 +354,7 @@ sisyphus refresh \
 * [ ] Some kind of CD dashboard with the ability to see logs and pause pushes for things? How would
       groups work?
 * [ ] Safer namespace deletions: check for untracked resources before deleting
-* [ ] Verify cluster-level resources really can't be made inside of namespaced folders
+* [x] Verify cluster-level resources really can't be made inside of namespaced folders
 * [ ] Starlark `load()` statements to allow code reuse
 * [ ] Rework the Starlark configuration so we can pass the cluster inside of ctx
 * [x] Resource requests and limits on Sisyphus deployments
