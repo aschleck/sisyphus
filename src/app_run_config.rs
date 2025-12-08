@@ -12,8 +12,13 @@ use tokio::process::Command;
 
 #[derive(Args, Debug)]
 pub(crate) struct RunConfigArgs {
+    #[arg(long)]
     pub binary: PathBuf,
+
+    #[arg(long)]
     pub config: PathBuf,
+
+    #[arg(long)]
     pub environment: String,
 }
 
