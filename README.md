@@ -292,6 +292,7 @@ export GOOGLE_CREDENTIALS="/path/to/local/creds.json"
 
 sisyphus app run-image \
     --image us-docker.pkg.dev/acme/containers/echo_config:latest
+    --environment dev
 ````
 
 This mounts `/path/to/local/creds.json` from your host into the container at the path specified
