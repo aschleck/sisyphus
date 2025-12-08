@@ -6,7 +6,7 @@ load("@tar.bzl", "mutate", "tar")
 
 def sisyphus_pushable(
     name,
-    binary_image,
+    binary_images,
     binary_repository,
     config_entrypoint,
     remote_tags,
@@ -18,7 +18,7 @@ def sisyphus_pushable(
     binary_multiarch = name + "_binary_multiarch"
     oci_image_index(
         name = binary_multiarch,
-        images = [binary_image],
+        images = binary_images,
         platforms = platforms or [
             "@dev_april_sisyphus//:linux_amd64",
             "@dev_april_sisyphus//:linux_arm64",
@@ -33,7 +33,7 @@ def sisyphus_pushable(
     )
 
     # Make the config
-    digest = binary_image + ".digest"
+    digest = binary_multiarch + ".digest"
     json_base = name + "_config_index_base_json"
     json_final = name + "_config_index_final_json"
 
