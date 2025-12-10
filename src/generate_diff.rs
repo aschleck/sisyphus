@@ -1,7 +1,7 @@
 use crate::kubernetes_io::{KubernetesKey, KubernetesResources};
 use anyhow::{anyhow, bail, Result};
 use console::{style, Style};
-use kube::api::DynamicObject;
+use kube::api::{DynamicObject, TypeMeta};
 use similar::{ChangeTag, TextDiff};
 use std::collections::HashSet;
 
@@ -76,45 +76,13 @@ fn generate_single_diff<'a>(
         (Some(h), Some(mut w)) => {
             let patch = json_patch::diff(&serde_json::to_value(&h)?, &serde_json::to_value(&w)?);
             let types = w.types.as_ref().ok_or_else(|| anyhow!("Expected types"))?;
-            let action = match (types.api_version.as_str(), types.kind.as_str()) {
-                ("apps/v1", "Deployment") => {
-                    let mut recreate = false;
-                    for modification in &patch.0 {
-                        match modification {
-                            json_patch::PatchOperation::Add(o) => {
-                                let path = o.path.to_string();
-                                if path.starts_with("/spec/selector/") {
-                                    recreate = true;
-                                }
-                            }
-                            json_patch::PatchOperation::Remove(o) => {
-                                let path = o.path.to_string();
-                                if path.starts_with("/spec/selector/") {
-                                    recreate = true;
-                                }
-                            }
-                            json_patch::PatchOperation::Replace(o) => {
-                                let path = o.path.to_string();
-                                if path.starts_with("/spec/selector/") {
-                                    recreate = true;
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-                    match recreate {
-                        true => {
-                            w.metadata.resource_version = None;
-                            w.metadata.uid = None;
-                            DiffAction::Recreate(w)
-                        }
-                        false => DiffAction::Patch { after: w, patch },
-                    }
-                }
-                _ => DiffAction::Patch { after: w, patch },
-            };
-
-            action
+            if requires_recreate(types, &patch) {
+                w.metadata.resource_version = None;
+                w.metadata.uid = None;
+                DiffAction::Recreate(w)
+            } else {
+                DiffAction::Patch { after: w, patch }
+            }
         }
         (Some(_), None) => DiffAction::Delete,
         (None, Some(w)) => DiffAction::Create(w),
@@ -133,6 +101,63 @@ fn generate_single_diff<'a>(
     print_diff(&diff);
     println!("");
     Ok(action)
+}
+
+fn requires_recreate(types: &TypeMeta, patch: &json_patch::Patch) -> bool {
+    match (types.api_version.as_str(), types.kind.as_str()) {
+        ("apps/v1", "Deployment") => {
+            for modification in &patch.0 {
+                match modification {
+                    json_patch::PatchOperation::Add(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/selector/") {
+                            return true;
+                        }
+                    }
+                    json_patch::PatchOperation::Remove(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/selector/") {
+                            return true;
+                        }
+                    }
+                    json_patch::PatchOperation::Replace(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/selector/") {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        ("batch/v1", "Job") => {
+            for modification in &patch.0 {
+                match modification {
+                    json_patch::PatchOperation::Add(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/template/") {
+                            return true;
+                        }
+                    }
+                    json_patch::PatchOperation::Remove(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/template/") {
+                            return true;
+                        }
+                    }
+                    json_patch::PatchOperation::Replace(o) => {
+                        let path = o.path.to_string();
+                        if path.starts_with("/spec/template/") {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {},
+    };
+    false
 }
 
 pub(crate) fn print_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> () {

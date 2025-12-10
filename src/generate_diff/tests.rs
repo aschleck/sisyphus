@@ -325,3 +325,263 @@ fn test_generate_diff_namespace_operations() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn test_deployment_selector_change_triggers_recreate() -> Result<()> {
+    let key = KubernetesKey {
+        api_version: "apps/v1".to_string(),
+        cluster: "prod".to_string(),
+        kind: "Deployment".to_string(),
+        name: "my-deployment".to_string(),
+        namespace: Some("default".to_string()),
+    };
+
+    let old_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "selector": {
+                    "matchLabels": {
+                        "app": "old-app"
+                    }
+                }
+            }
+        }),
+    };
+
+    let new_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "selector": {
+                    "matchLabels": {
+                        "app": "new-app"
+                    }
+                }
+            }
+        }),
+    };
+
+    let have = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), old_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let want = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), new_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let diff = generate_diff(have, want)?;
+
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].0, key);
+    assert!(matches!(diff[0].1, DiffAction::Recreate(_)));
+
+    Ok(())
+}
+
+#[test]
+fn test_deployment_non_selector_change_triggers_patch() -> Result<()> {
+    let key = KubernetesKey {
+        api_version: "apps/v1".to_string(),
+        cluster: "prod".to_string(),
+        kind: "Deployment".to_string(),
+        name: "my-deployment".to_string(),
+        namespace: Some("default".to_string()),
+    };
+
+    let old_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "replicas": 1,
+                "selector": {
+                    "matchLabels": {
+                        "app": "my-app"
+                    }
+                }
+            }
+        }),
+    };
+
+    let new_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "apps/v1".to_string(),
+            kind: "Deployment".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "replicas": 3,
+                "selector": {
+                    "matchLabels": {
+                        "app": "my-app"
+                    }
+                }
+            }
+        }),
+    };
+
+    let have = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), old_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let want = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), new_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let diff = generate_diff(have, want)?;
+
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].0, key);
+    assert!(matches!(diff[0].1, DiffAction::Patch { .. }));
+
+    Ok(())
+}
+
+#[test]
+fn test_job_template_change_triggers_recreate() -> Result<()> {
+    let key = KubernetesKey {
+        api_version: "batch/v1".to_string(),
+        cluster: "prod".to_string(),
+        kind: "Job".to_string(),
+        name: "my-job".to_string(),
+        namespace: Some("default".to_string()),
+    };
+
+    let old_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": "job",
+                            "image": "busybox:1.0"
+                        }]
+                    }
+                }
+            }
+        }),
+    };
+
+    let new_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": "job",
+                            "image": "busybox:2.0"
+                        }]
+                    }
+                }
+            }
+        }),
+    };
+
+    let have = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), old_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let want = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), new_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let diff = generate_diff(have, want)?;
+
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].0, key);
+    assert!(matches!(diff[0].1, DiffAction::Recreate(_)));
+
+    Ok(())
+}
+
+#[test]
+fn test_job_non_template_change_triggers_patch() -> Result<()> {
+    let key = KubernetesKey {
+        api_version: "batch/v1".to_string(),
+        cluster: "prod".to_string(),
+        kind: "Job".to_string(),
+        name: "my-job".to_string(),
+        namespace: Some("default".to_string()),
+    };
+
+    let old_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "parallelism": 1,
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": "job",
+                            "image": "busybox:1.0"
+                        }]
+                    }
+                }
+            }
+        }),
+    };
+
+    let new_object = DynamicObject {
+        types: Some(TypeMeta {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+        }),
+        metadata: ObjectMeta::default(),
+        data: json!({
+            "spec": {
+                "parallelism": 2,
+                "template": {
+                    "spec": {
+                        "containers": [{
+                            "name": "job",
+                            "image": "busybox:1.0"
+                        }]
+                    }
+                }
+            }
+        }),
+    };
+
+    let have = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), old_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let want = KubernetesResources {
+        by_key: BTreeMap::from([(key.clone(), new_object)]),
+        namespaces: BTreeMap::new(),
+    };
+    let diff = generate_diff(have, want)?;
+
+    assert_eq!(diff.len(), 1);
+    assert_eq!(diff[0].0, key);
+    assert!(matches!(diff[0].1, DiffAction::Patch { .. }));
+
+    Ok(())
+}
