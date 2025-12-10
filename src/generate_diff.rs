@@ -131,24 +131,34 @@ fn requires_recreate(types: &TypeMeta, patch: &json_patch::Patch) -> bool {
             }
         }
         ("batch/v1", "Job") => {
+            let prefixes: Vec<&str> = vec![
+                "/spec/selector",
+                "/spec/template",
+            ];
             for modification in &patch.0 {
                 match modification {
                     json_patch::PatchOperation::Add(o) => {
                         let path = o.path.to_string();
-                        if path.starts_with("/spec/template/") {
-                            return true;
+                        for prefix in &prefixes {
+                            if path.starts_with(prefix) {
+                                return true;
+                            }
                         }
                     }
                     json_patch::PatchOperation::Remove(o) => {
                         let path = o.path.to_string();
-                        if path.starts_with("/spec/template/") {
-                            return true;
+                        for prefix in &prefixes {
+                            if path.starts_with(prefix) {
+                                return true;
+                            }
                         }
                     }
                     json_patch::PatchOperation::Replace(o) => {
                         let path = o.path.to_string();
-                        if path.starts_with("/spec/template/") {
-                            return true;
+                        for prefix in &prefixes {
+                            if path.starts_with(prefix) {
+                                return true;
+                            }
                         }
                     }
                     _ => {}

@@ -534,8 +534,10 @@ fn test_job_non_template_change_triggers_patch() -> Result<()> {
         }),
         metadata: ObjectMeta::default(),
         data: json!({
-            "spec": {
-                "parallelism": 1,
+            "meta": {
+                "labels": {
+                    "dog": "red",
+                },
                 "template": {
                     "spec": {
                         "containers": [{
@@ -556,7 +558,9 @@ fn test_job_non_template_change_triggers_patch() -> Result<()> {
         metadata: ObjectMeta::default(),
         data: json!({
             "spec": {
-                "parallelism": 2,
+                "labels": {
+                    "dog": "blue",
+                },
                 "template": {
                     "spec": {
                         "containers": [{
