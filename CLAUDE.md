@@ -1,0 +1,3 @@
+# Building
+
+`bazelisk build //:sisyphus`

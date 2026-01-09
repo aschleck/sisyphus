@@ -1,6 +1,8 @@
 use anyhow::{bail, Context, Result};
 use kube::{api::{DeleteParams, DynamicObject, Patch, PatchParams}, discovery::Scope};
 use sqlx::AnyPool;
+use std::time::Duration;
+use tokio::time::sleep;
 
 use crate::{
     generate_diff::DiffAction,
@@ -28,9 +30,18 @@ pub(crate) async fn apply_diff(
                 bail!("Creating a namespaced-scoped resource without a namespace is disallowed"),
         }
     }
+    let mut pending_deletions: Vec<(kube::Api<DynamicObject>, String)> = Vec::new();
     for (key, action) in changed {
         let api = get_kubernetes_api(&key, &clients, &types)?;
+        let is_delete = matches!(action, DiffAction::Delete);
         apply_single_diff(action, &key, &api, pool).await?;
+        if is_delete {
+            pending_deletions.push((api, key.name.clone()));
+        }
+    }
+    // Wait for all deletions to complete before returning
+    for (api, name) in &pending_deletions {
+        wait_for_deletion(api, name).await?;
     }
     Ok(())
 }
@@ -127,6 +138,7 @@ async fn apply_single_diff(
                 .await
                 .with_context(|| format!("while replacing {}", key))?;
             println!("Deleting prior to recreate {}", key);
+            wait_for_deletion(api, &key.name).await?;
             let result = api
                 .patch(
                     &key.name,
@@ -163,4 +175,24 @@ async fn apply_single_diff(
 
 pub(crate) fn namespace_or_default(namespace: Option<String>) -> String {
     namespace.unwrap_or_else(|| "".to_string())
+}
+
+async fn wait_for_deletion(api: &kube::Api<DynamicObject>, name: &str) -> Result<()> {
+    let mut i = 0;
+    loop {
+        if i == 1 {
+            println!("Waiting for {} to be deleted...", name);
+        }
+
+        match api.get_opt(name).await? {
+            Some(_) => {
+                sleep(Duration::from_millis(500)).await;
+            }
+            None => {
+                return Ok(());
+            }
+        }
+
+        i += 1;
+    }
 }
