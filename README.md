@@ -101,6 +101,8 @@ is like a `StringVariable` but ensures the value of the string is mounted in the
 specified path. `Port` is a special marker that ensures the ports are exposed in the Kubernetes
 deployment object and are available for use by Kubernetes `Service`s.
 
+`ctx` currently only has one method: `ctx.namespace()` provides the namespace of the object.
+
 ### Defining a config image
 
 Configuration images can be built using various tools. If you use Bazel, you can use the
@@ -251,7 +253,8 @@ Starlark file. This resolves arguments and environment variables for your chosen
 sisyphus app run-config \
     --config example/echo/frontend.star \
     --binary bazel-bin/echo/echo \
-    --environment dev
+    --environment dev \
+    --namespace apps # optional, sets ctx.namespace
 ````
 
 Variables are resolved from environment variables. For `StringVariable` and `FileVariable`,
@@ -279,7 +282,8 @@ If you've already built and pushed your config image, you can run it locally usi
 ````bash
 sisyphus app run-image \
     --image us-docker.pkg.dev/acme/containers/echo_config:latest \
-    --environment dev
+    --environment dev \
+    --namespace apps # optional
 ````
 
 This downloads the config image, extracts the binary image reference and configuration, and

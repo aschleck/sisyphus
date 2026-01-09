@@ -16,6 +16,9 @@ pub(crate) struct RunImageArgs {
 
     #[arg(long)]
     pub image: String,
+
+    #[arg(long)]
+    pub namespace: Option<String>,
 }
 
 #[derive(Debug)]
@@ -38,9 +41,10 @@ enum ResolvedArgument {
 
 pub async fn run_image(args: RunImageArgs) -> Result<()> {
     let mut registries = RegistryClients::new();
-    let (binary_image, application) = load_config_from_image(&args.image, &mut registries)
-        .await
-        .with_context(|| format!("Failed to load config from image: {}", args.image))?;
+    let (binary_image, application) =
+        load_config_from_image(&args.image, &mut registries, args.namespace.as_deref())
+            .await
+            .with_context(|| format!("Failed to load config from image: {}", args.image))?;
     let config = build_config_container(&application, &args.environment)?;
     run_container_podman(&binary_image, config).await
 }
@@ -101,9 +105,11 @@ fn build_config_container(app: &Application, environment: &str) -> Result<Contai
 async fn load_config_from_image(
     image: &String,
     registries: &mut RegistryClients,
+    namespace: Option<&str>,
 ) -> Result<(String, Application)> {
     let reference = resolve_image_tag(image, registries).await?;
-    let (index, application) = prepare_image_config(&reference.to_string(), registries).await?;
+    let (index, application) =
+        prepare_image_config(&reference.to_string(), registries, namespace).await?;
     let binary_image = format!("{}@{}", index.binary_repository, index.binary_digest);
     Ok((binary_image, application))
 }

@@ -299,12 +299,15 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
     }
 }
 
-pub(crate) async fn get_config(root: &Path) -> Result<(ConfigImageIndex, Application)> {
+pub(crate) async fn get_config(
+    root: &Path,
+    namespace: Option<&str>,
+) -> Result<(ConfigImageIndex, Application)> {
     let index_path = root.join("index.json");
     let index: ConfigImageIndex =
         serde_json::from_str(&tokio::fs::read_to_string(index_path).await?)?;
     let config_path = root.join(&index.config_entrypoint);
-    let application = crate::starlark::load_starlark_config(&config_path).await?;
+    let application = crate::starlark::load_starlark_config(&config_path, namespace).await?;
     Ok((index, application))
 }
 

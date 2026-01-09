@@ -47,7 +47,9 @@ pub(crate) async fn render_sisyphus_resource(
             handle_kubernetes_yaml_resource(v, allow_any_namespace, maybe_namespace, by_key)?;
         }
         SisyphusResource::SisyphusCronJob(v) => {
-            let (index, application) = prepare_image_config(&v.config.image, registries).await?;
+            let (index, application) =
+                prepare_image_config(&v.config.image, registries, maybe_namespace.as_deref())
+                    .await?;
 
             let metadata = render_deployment_metadata(
                 &v.metadata.name,
@@ -82,7 +84,9 @@ pub(crate) async fn render_sisyphus_resource(
             )?;
         }
         SisyphusResource::SisyphusDeployment(v) => {
-            let (index, application) = prepare_image_config(&v.config.image, registries).await?;
+            let (index, application) =
+                prepare_image_config(&v.config.image, registries, maybe_namespace.as_deref())
+                    .await?;
 
             let metadata = render_deployment_metadata(
                 &v.metadata.name,
@@ -164,6 +168,7 @@ fn handle_kubernetes_yaml_resource(
 pub(crate) async fn prepare_image_config(
     image_config: &String,
     registries: &mut RegistryClients,
+    namespace: Option<&str>,
 ) -> Result<(ConfigImageIndex, Application)> {
     let (image, registry) = registries.get_reference_and_registry(image_config).await?;
     let repository = image.repository();
@@ -178,7 +183,7 @@ pub(crate) async fn prepare_image_config(
     let blobs = try_join_all(blob_futures).await?;
     let path = TempDir::new()?;
     containerRender::unpack(&blobs, path.path())?;
-    let (index, application) = get_config(path.path()).await?;
+    let (index, application) = get_config(path.path(), namespace).await?;
     Ok((index, application))
 }
 

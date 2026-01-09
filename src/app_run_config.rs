@@ -20,10 +20,13 @@ pub(crate) struct RunConfigArgs {
 
     #[arg(long)]
     pub environment: String,
+
+    #[arg(long)]
+    pub namespace: Option<String>,
 }
 
 pub(crate) async fn run_config(args: RunConfigArgs) -> Result<()> {
-    let application = load_starlark_config(&args.config)
+    let application = load_starlark_config(&args.config, args.namespace.as_deref())
         .await
         .with_context(|| format!("Failed to load config from {}", args.config.display()))?;
     let (cmd_args, env_vars) = build_config_local(&application, &args.environment)?;
