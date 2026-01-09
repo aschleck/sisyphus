@@ -96,8 +96,9 @@ pub(crate) async fn render_sisyphus_resource(
                 maybe_namespace,
             )?;
             let labels = metadata.labels.clone().unwrap_or_default();
+            let annotations = metadata.annotations.clone().unwrap_or_default();
 
-            let mut independent_spec = build_base_deployment_spec(labels.clone());
+            let mut independent_spec = build_base_deployment_spec(labels.clone(), annotations);
 
             let (container, ports, volumes) = build_container_config(
                 &v.metadata.name,
@@ -217,7 +218,10 @@ fn render_deployment_metadata(
     Ok(metadata)
 }
 
-fn build_base_deployment_spec(labels: BTreeMap<String, String>) -> DeploymentSpec {
+fn build_base_deployment_spec(
+    labels: BTreeMap<String, String>,
+    annotations: BTreeMap<String, String>,
+) -> DeploymentSpec {
     let mut independent_spec = DeploymentSpec::default();
     independent_spec.selector.match_labels = Some(labels.clone());
     independent_spec.progress_deadline_seconds = Some(600);
@@ -231,6 +235,9 @@ fn build_base_deployment_spec(labels: BTreeMap<String, String>) -> DeploymentSpe
     });
     let mut template_metadata = ObjectMeta::default();
     template_metadata.labels = Some(labels);
+    if !annotations.is_empty() {
+        template_metadata.annotations = Some(annotations);
+    }
     independent_spec.template.metadata = Some(template_metadata);
     independent_spec
 }
@@ -463,15 +470,20 @@ fn process_cronjob_footprint(
     namespace: &str,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
 ) -> Result<()> {
+    let template_metadata = ObjectMeta {
+        labels: metadata.labels.clone(),
+        annotations: metadata.annotations.clone(),
+        ..Default::default()
+    };
     for (cluster, _) in &sisyphus_cronjob.footprint {
         let cronjob_spec = CronJobSpec {
             concurrency_policy: concurrency_policy.clone(),
             schedule: schedule.to_string(),
             job_template: JobTemplateSpec {
-                metadata: None,
+                metadata: Some(template_metadata.clone()),
                 spec: Some(JobSpec {
                     template: PodTemplateSpec {
-                        metadata: None,
+                        metadata: Some(template_metadata.clone()),
                         spec: Some(pod_spec.clone()),
                     },
                     ..Default::default()

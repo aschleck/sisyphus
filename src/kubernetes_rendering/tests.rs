@@ -232,7 +232,8 @@ fn test_process_deployment_footprint() -> Result<()> {
     };
 
     let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
-    let deployment_spec = build_base_deployment_spec(labels);
+    let annotations = BTreeMap::new();
+    let deployment_spec = build_base_deployment_spec(labels, annotations);
 
     let mut by_key = BTreeMap::new();
 
@@ -312,7 +313,8 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
     };
 
     let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
-    let deployment_spec = build_base_deployment_spec(labels.clone());
+    let annotations = BTreeMap::new();
+    let deployment_spec = build_base_deployment_spec(labels.clone(), annotations);
 
     // Create a service spec
     let mut service_spec = ServiceSpec::default();
@@ -355,8 +357,9 @@ fn test_build_base_deployment_spec() {
         ("app".to_string(), "test-app".to_string()),
         ("env".to_string(), "prod".to_string()),
     ]);
+    let annotations = BTreeMap::new();
 
-    let spec = build_base_deployment_spec(labels.clone());
+    let spec = build_base_deployment_spec(labels.clone(), annotations);
 
     // Verify selector
     assert_eq!(spec.selector.match_labels, Some(labels.clone()));
@@ -639,5 +642,124 @@ fn test_render_argument_varying_not_found() -> Result<()> {
     )?;
 
     assert!(result.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_deployment_labels_and_annotations_propagate_to_pods() {
+    let labels = BTreeMap::from([
+        ("app".to_string(), "my-app".to_string()),
+        ("env".to_string(), "production".to_string()),
+    ]);
+    let annotations = BTreeMap::from([
+        ("prometheus.io/scrape".to_string(), "true".to_string()),
+        ("prometheus.io/port".to_string(), "9090".to_string()),
+    ]);
+
+    let spec = build_base_deployment_spec(labels.clone(), annotations.clone());
+
+    // Verify labels propagate to pod template
+    let template_metadata = spec.template.metadata.expect("Expected template metadata");
+    assert_eq!(template_metadata.labels, Some(labels.clone()));
+
+    // Verify annotations propagate to pod template
+    assert_eq!(template_metadata.annotations, Some(annotations));
+
+    // Verify selector also has the labels
+    assert_eq!(spec.selector.match_labels, Some(labels));
+}
+
+#[test]
+fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let labels = BTreeMap::from([
+        ("app".to_string(), "my-cronjob".to_string()),
+        ("team".to_string(), "platform".to_string()),
+    ]);
+    let annotations = BTreeMap::from([
+        ("description".to_string(), "Nightly cleanup job".to_string()),
+        ("owner".to_string(), "team@example.com".to_string()),
+    ]);
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: labels.clone(),
+            annotations: annotations.clone(),
+        },
+        config: CronJobConfig {
+            concurrency_policy: None,
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            schedule: "0 0 * * *".to_string(),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        labels: Some(labels.clone()),
+        annotations: Some(annotations.clone()),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    container.image = Some("test-image:latest".to_string());
+
+    let pod_spec = build_pod_spec(container, Vec::new());
+
+    let mut by_key = BTreeMap::new();
+
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        &None,
+        "0 0 * * *",
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    let cronjob_obj = by_key.values().next().unwrap();
+    let spec = cronjob_obj.data.get("spec").unwrap();
+    let job_template = spec.get("jobTemplate").unwrap();
+
+    // Verify labels and annotations on job template metadata
+    let job_metadata = job_template.get("metadata").unwrap();
+    let job_labels = job_metadata.get("labels").unwrap();
+    assert_eq!(job_labels.get("app").unwrap().as_str().unwrap(), "my-cronjob");
+    assert_eq!(job_labels.get("team").unwrap().as_str().unwrap(), "platform");
+    let job_annotations = job_metadata.get("annotations").unwrap();
+    assert_eq!(
+        job_annotations.get("description").unwrap().as_str().unwrap(),
+        "Nightly cleanup job"
+    );
+    assert_eq!(
+        job_annotations.get("owner").unwrap().as_str().unwrap(),
+        "team@example.com"
+    );
+
+    // Verify labels and annotations on pod template metadata
+    let job_spec = job_template.get("spec").unwrap();
+    let pod_template = job_spec.get("template").unwrap();
+    let pod_metadata = pod_template.get("metadata").unwrap();
+    let pod_labels = pod_metadata.get("labels").unwrap();
+    assert_eq!(pod_labels.get("app").unwrap().as_str().unwrap(), "my-cronjob");
+    assert_eq!(pod_labels.get("team").unwrap().as_str().unwrap(), "platform");
+    let pod_annotations = pod_metadata.get("annotations").unwrap();
+    assert_eq!(
+        pod_annotations.get("description").unwrap().as_str().unwrap(),
+        "Nightly cleanup job"
+    );
+    assert_eq!(
+        pod_annotations.get("owner").unwrap().as_str().unwrap(),
+        "team@example.com"
+    );
+
     Ok(())
 }
