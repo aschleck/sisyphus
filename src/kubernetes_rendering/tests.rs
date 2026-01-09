@@ -17,6 +17,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
             concurrency_policy: None,
             env: "prod".to_string(),
             image: "test-image".to_string(),
+            restart_policy: None,
             schedule: "0 0 * * *".to_string(),
             variables: BTreeMap::new(),
         },
@@ -40,7 +41,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -85,6 +86,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
             concurrency_policy: None,
             env: "prod".to_string(),
             image: "test-image".to_string(),
+            restart_policy: None,
             schedule: "*/5 * * * *".to_string(),
             variables: BTreeMap::new(),
         },
@@ -101,7 +103,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -152,6 +154,7 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
             concurrency_policy: Some("Forbid".to_string()),
             env: "prod".to_string(),
             image: "test-image".to_string(),
+            restart_policy: None,
             schedule: "0 * * * *".to_string(),
             variables: BTreeMap::new(),
         },
@@ -168,7 +171,7 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -391,7 +394,7 @@ fn test_build_pod_spec() {
     volume.name = "test-volume".to_string();
     let volumes = vec![volume.clone()];
 
-    let pod_spec = build_pod_spec(container.clone(), volumes.clone());
+    let pod_spec = build_pod_spec(container.clone(), "Always", volumes.clone());
 
     // Verify container
     assert_eq!(pod_spec.containers.len(), 1);
@@ -416,7 +419,7 @@ fn test_build_pod_spec_empty_volumes() {
     let mut container = Container::default();
     container.name = "test-container".to_string();
 
-    let pod_spec = build_pod_spec(container, Vec::new());
+    let pod_spec = build_pod_spec(container, "Always", Vec::new());
     assert_eq!(pod_spec.volumes, None);
 }
 
@@ -693,6 +696,7 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
             concurrency_policy: None,
             env: "prod".to_string(),
             image: "test-image".to_string(),
+            restart_policy: None,
             schedule: "0 0 * * *".to_string(),
             variables: BTreeMap::new(),
         },
@@ -711,7 +715,7 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -762,4 +766,22 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     );
 
     Ok(())
+}
+
+#[test]
+fn test_build_pod_spec_restart_policy() {
+    let mut container = Container::default();
+    container.name = "test-container".to_string();
+
+    // Test with OnFailure (typical for Jobs/CronJobs)
+    let pod_spec = build_pod_spec(container.clone(), "OnFailure", Vec::new());
+    assert_eq!(pod_spec.restart_policy, Some("OnFailure".to_string()));
+
+    // Test with Never (also valid for Jobs/CronJobs)
+    let pod_spec = build_pod_spec(container.clone(), "Never", Vec::new());
+    assert_eq!(pod_spec.restart_policy, Some("Never".to_string()));
+
+    // Test with Always (typical for Deployments)
+    let pod_spec = build_pod_spec(container, "Always", Vec::new());
+    assert_eq!(pod_spec.restart_policy, Some("Always".to_string()));
 }

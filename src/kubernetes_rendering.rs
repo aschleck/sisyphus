@@ -67,7 +67,8 @@ pub(crate) async fn render_sisyphus_resource(
                 &v.config.variables,
             )?;
 
-            let pod_spec = build_pod_spec(container, volumes);
+            let restart_policy = v.config.restart_policy.as_deref().unwrap_or("OnFailure");
+            let pod_spec = build_pod_spec(container, restart_policy, volumes);
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -108,7 +109,7 @@ pub(crate) async fn render_sisyphus_resource(
                 &v.config.variables,
             )?;
 
-            independent_spec.template.spec = Some(build_pod_spec(container, volumes));
+            independent_spec.template.spec = Some(build_pod_spec(container, "Always", volumes));
 
             let service_spec_option =
                 build_service_spec(&v.config.service, &ports, labels.clone())?;
@@ -410,7 +411,7 @@ fn build_container_config(
     Ok((container, ports, volumes))
 }
 
-fn build_pod_spec(container: Container, volumes: Vec<Volume>) -> PodSpec {
+fn build_pod_spec(container: Container, restart_policy: &str, volumes: Vec<Volume>) -> PodSpec {
     let mut pod_spec = PodSpec::default();
     pod_spec.containers.push(container);
     if volumes.len() > 0 {
@@ -418,7 +419,7 @@ fn build_pod_spec(container: Container, volumes: Vec<Volume>) -> PodSpec {
     }
     // Set some defaults
     pod_spec.dns_policy = Some("ClusterFirst".to_string());
-    pod_spec.restart_policy = Some("Always".to_string());
+    pod_spec.restart_policy = Some(restart_policy.to_string());
     // TODO(april): this won't work when there's another scheduler
     pod_spec.scheduler_name = Some("default-scheduler".to_string());
     pod_spec.security_context = Some(PodSecurityContext::default());

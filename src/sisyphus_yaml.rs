@@ -121,6 +121,7 @@ pub struct CronJobConfig {
     pub concurrency_policy: Option<String>,
     pub env: String,
     pub image: String,
+    pub restart_policy: Option<String>,
     pub schedule: String,
     #[serde(default)]
     pub variables: BTreeMap<String, VariableSource>,
