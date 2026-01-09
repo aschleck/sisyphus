@@ -74,6 +74,7 @@ pub(crate) async fn render_sisyphus_resource(
             process_cronjob_footprint(
                 v,
                 &metadata,
+                &v.config.concurrency_policy,
                 &v.config.schedule,
                 &pod_spec,
                 namespace,
@@ -451,6 +452,7 @@ fn build_service_spec(
 fn process_cronjob_footprint(
     sisyphus_cronjob: &crate::sisyphus_yaml::SisyphusCronJob,
     metadata: &ObjectMeta,
+    concurrency_policy: &Option<String>,
     schedule: &str,
     pod_spec: &PodSpec,
     namespace: &str,
@@ -458,6 +460,7 @@ fn process_cronjob_footprint(
 ) -> Result<()> {
     for (cluster, _) in &sisyphus_cronjob.footprint {
         let cronjob_spec = CronJobSpec {
+            concurrency_policy: concurrency_policy.clone(),
             schedule: schedule.to_string(),
             job_template: JobTemplateSpec {
                 metadata: None,

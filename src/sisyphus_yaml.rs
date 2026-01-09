@@ -118,6 +118,7 @@ pub struct Metadata {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct CronJobConfig {
+    pub concurrency_policy: Option<String>,
     pub env: String,
     pub image: String,
     pub schedule: String,

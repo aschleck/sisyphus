@@ -14,6 +14,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
             annotations: BTreeMap::new(),
         },
         config: CronJobConfig {
+            concurrency_policy: None,
             env: "prod".to_string(),
             image: "test-image".to_string(),
             schedule: "0 0 * * *".to_string(),
@@ -46,6 +47,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
     process_cronjob_footprint(
         &cronjob,
         &metadata,
+        &None,
         "0 0 * * *",
         &pod_spec,
         "default",
@@ -80,6 +82,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
             annotations: BTreeMap::new(),
         },
         config: CronJobConfig {
+            concurrency_policy: None,
             env: "prod".to_string(),
             image: "test-image".to_string(),
             schedule: "*/5 * * * *".to_string(),
@@ -105,6 +108,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
     process_cronjob_footprint(
         &cronjob,
         &metadata,
+        &None,
         "*/5 * * * *",
         &pod_spec,
         "default",
@@ -129,6 +133,59 @@ fn test_cronjob_spec_structure() -> Result<()> {
     assert!(job_spec.get("template").is_some());
     let pod_template = job_spec.get("template").unwrap();
     assert!(pod_template.get("spec").is_some());
+
+    Ok(())
+}
+
+#[test]
+fn test_cronjob_concurrency_policy() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: CronJobConfig {
+            concurrency_policy: Some("Forbid".to_string()),
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            schedule: "0 * * * *".to_string(),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    container.image = Some("test-image:latest".to_string());
+
+    let pod_spec = build_pod_spec(container, Vec::new());
+
+    let mut by_key = BTreeMap::new();
+
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        &Some("Forbid".to_string()),
+        "0 * * * *",
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    let cronjob_obj = by_key.values().next().unwrap();
+    let spec = cronjob_obj.data.get("spec").unwrap();
+    let concurrency_policy = spec.get("concurrencyPolicy").unwrap().as_str().unwrap();
+    assert_eq!(concurrency_policy, "Forbid");
 
     Ok(())
 }
