@@ -378,6 +378,49 @@ fn test_copy_unmanaged_fields_mixed_types_array_to_object() -> Result<()> {
     Ok(())
 }
 
+// Test that replacing an env var (changing name and switching value -> valueFrom)
+// doesn't leak the old "value" field into the new entry
+#[test]
+fn test_copy_unmanaged_fields_replace_env_var_value_to_value_from() -> Result<()> {
+    let have = json!([
+        {"name": "ANTHROPIC_VERTEX_CHAT_MODEL", "value": "claude-opus-4-6"},
+        {"name": "ANTHROPIC_VERTEX_REGION", "value": "us-east5"},
+    ]);
+    let want = json!([
+        {"name": "ANTHROPIC_API_KEY", "valueFrom": {"secretKeyRef": {"key": "anthropic-api-key", "name": "frontend"}}},
+        {"name": "ANTHROPIC_CHAT_MODEL", "value": "claude-opus-4-6"},
+        {"name": "ANTHROPIC_VERTEX_REGION", "value": "us-east5"},
+    ]);
+    let managed = json!({
+        r#"k:{"name":"ANTHROPIC_VERTEX_CHAT_MODEL"}"#: {".":{}, "f:name": {}, "f:value": {}},
+        r#"k:{"name":"ANTHROPIC_VERTEX_REGION"}"#: {".":{}, "f:name": {}, "f:value": {}}
+    });
+
+    let merged = copy_unmanaged_fields(&have, &want, &managed)?;
+    // ANTHROPIC_API_KEY should only have valueFrom, not the old "value" from ANTHROPIC_VERTEX_CHAT_MODEL
+    let arr = merged.as_array().unwrap();
+    let api_key_entry = arr.iter().find(|v| v["name"] == "ANTHROPIC_API_KEY").unwrap();
+    assert_eq!(api_key_entry.get("value"), None);
+    assert!(api_key_entry.get("valueFrom").is_some());
+    Ok(())
+}
+
+// Test that unowned keys from have are preserved when managed fields are null
+// (e.g. Service fields like clusterIP, status set by other controllers)
+#[test]
+fn test_copy_unmanaged_fields_object_null_managed_preserves_have_keys() -> Result<()> {
+    let have = json!({"name": "foo", "clusterIP": "10.0.0.1", "type": "ClusterIP"});
+    let want = json!({"name": "foo"});
+    let managed = JsonValue::Null;
+
+    let merged = copy_unmanaged_fields(&have, &want, &managed)?;
+    assert_eq!(
+        merged,
+        json!({"name": "foo", "clusterIP": "10.0.0.1", "type": "ClusterIP"})
+    );
+    Ok(())
+}
+
 // Tests for munge_secrets
 #[test]
 fn test_munge_secrets_non_secret_resource() -> Result<()> {

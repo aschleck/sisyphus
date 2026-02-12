@@ -149,13 +149,9 @@ fn copy_unmanaged_fields(
                 copy.push(new_value);
             }
 
-            for i in unmatched {
-                if unused.len() > 0 {
-                    let hv = unused.remove(0);
-                    let wv = copy.get_mut(i).unwrap();
-                    *wv = copy_unmanaged_fields(&hv, &wv, &JsonValue::Null)?;
-                }
-            }
+            // Don't merge unmatched want items with unused have items — without
+            // a matching selector they are different items and merging could leak
+            // fields (e.g. an old "value" into a new "valueFrom" env var).
 
             JsonValue::Array(copy)
         }
