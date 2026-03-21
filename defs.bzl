@@ -5,20 +5,21 @@ load("@rules_oci//oci:defs.bzl", "oci_image", "oci_image_index", "oci_push")
 load("@tar.bzl", "mutate", "tar")
 
 def sisyphus_pushable(
-    name,
-    binary_images,
-    binary_repository,
-    config_entrypoint,
-    remote_tags,
-    deps = [],
-    platforms = None,
-    srcs = [],
-):
+        name,
+        binary_images,
+        binary_repository,
+        config_entrypoint,
+        remote_tags,
+        deps = [],
+        platforms = None,
+        srcs = [],
+        tags = None):
     # Make the binary
     binary_multiarch = name + "_binary_multiarch"
     oci_image_index(
         name = binary_multiarch,
         images = binary_images,
+        tags = tags,
         platforms = platforms or [
             "@dev_april_sisyphus//:linux_amd64",
             "@dev_april_sisyphus//:linux_arm64",
@@ -30,6 +31,7 @@ def sisyphus_pushable(
         image = ":" + binary_multiarch,
         repository = binary_repository,
         remote_tags = ["latest"],
+        tags = tags,
     )
 
     # Make the config
@@ -54,11 +56,11 @@ def sisyphus_pushable(
         name = json_base,
         out = name + "_index_base.json",
         template = [
-          "{",
-          "  \"binary_digest\": \"{DIGEST}\",",
-          "  \"binary_repository\": \"{BINARY_REPOSITORY}\",",
-          "  \"config_entrypoint\": \"{CONFIG_ENTRYPOINT}\"",
-          "}\n",
+            "{",
+            "  \"binary_digest\": \"{DIGEST}\",",
+            "  \"binary_repository\": \"{BINARY_REPOSITORY}\",",
+            "  \"config_entrypoint\": \"{CONFIG_ENTRYPOINT}\"",
+            "}\n",
         ],
         substitutions = {
             "{BINARY_REPOSITORY}": binary_repository,
@@ -88,6 +90,7 @@ def sisyphus_pushable(
         name = config_image,
         architecture = "arm64",
         os = "linux",
+        tags = tags,
         tars = [
             config_files_tar,
             config_index_tar,
@@ -98,6 +101,7 @@ def sisyphus_pushable(
     oci_image_index(
         name = config_multiarch,
         images = [config_image],
+        tags = tags,
         platforms = platforms or [
             "@dev_april_sisyphus//:linux_amd64",
             "@dev_april_sisyphus//:linux_arm64",
@@ -109,6 +113,7 @@ def sisyphus_pushable(
         image = ":" + config_multiarch,
         repository = binary_repository + "_config",
         remote_tags = remote_tags,
+        tags = tags,
     )
 
     multirun(
@@ -118,4 +123,5 @@ def sisyphus_pushable(
             name + "_config_push",
         ],
         jobs = 0,  # parallel
+        tags = tags,
     )
