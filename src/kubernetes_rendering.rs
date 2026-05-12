@@ -9,7 +9,6 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use docker_registry::render as containerRender;
 use futures::future::try_join_all;
-use json_patch::jsonptr::{Assign, Pointer};
 use k8s_openapi::{
     api::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
@@ -27,7 +26,6 @@ use kube::{
     ResourceExt,
 };
 use serde::Deserialize;
-use serde_json::Value as JsonValue;
 use std::{collections::BTreeMap, path::Path};
 use tempfile::TempDir;
 
@@ -498,16 +496,8 @@ fn process_cronjob_footprint(
             spec: Some(cronjob_spec),
             status: None,
         })?;
-        let mut converted =
+        let converted =
             DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
-        converted.data.assign(
-            Pointer::parse("/spec/jobTemplate/metadata/creationTimestamp")?,
-            JsonValue::Null,
-        )?;
-        converted.data.assign(
-            Pointer::parse("/spec/jobTemplate/spec/template/metadata/creationTimestamp")?,
-            JsonValue::Null,
-        )?;
         let types = converted
             .types
             .clone()
@@ -541,12 +531,8 @@ fn process_deployment_footprint(
                 spec: Some(spec),
                 status: None,
             })?;
-            let mut converted =
+            let converted =
                 DynamicObject::deserialize(serde_yaml::Deserializer::from_str(&serialized))?;
-            converted.data.assign(
-                Pointer::parse("/spec/template/metadata/creationTimestamp")?,
-                JsonValue::Null,
-            )?;
             let types = converted
                 .types
                 .clone()
