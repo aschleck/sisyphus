@@ -14,7 +14,9 @@ use crate::{
     app_run_config::{run_config, RunConfigArgs},
     app_run_image::{run_image, RunImageArgs},
     apply_diff::{apply_diff, namespace_or_default},
-    filter::{key_matches_filter, PartialKey},
+    filter::{
+        key_matches_filter, namespace_key_retained, required_namespace_identities, PartialKey,
+    },
     generate_diff::{generate_diff, print_diff, DiffAction},
     kubernetes_io::{
         get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
@@ -406,15 +408,22 @@ async fn diff(
     from_files
         .by_key
         .retain(|k, _| key_matches_filter(k, filter));
-    from_files
-        .namespaces
-        .retain(|k, _| key_matches_filter(k, filter));
     from_database
         .by_key
         .retain(|k, _| key_matches_filter(k, filter));
+
+    // Keep the namespaces holding any resource we're pushing, even when the
+    // filter (e.g. `--name`) doesn't match the Namespace object itself.
+    // Otherwise a scoped push into a not-yet-created namespace drops the
+    // namespace and the resource fails to create.
+    let required_namespaces =
+        required_namespace_identities(from_files.by_key.keys().chain(from_database.by_key.keys()));
+    from_files
+        .namespaces
+        .retain(|k, _| namespace_key_retained(k, filter, &required_namespaces));
     from_database
         .namespaces
-        .retain(|k, _| key_matches_filter(k, filter));
+        .retain(|k, _| namespace_key_retained(k, filter, &required_namespaces));
 
     let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
