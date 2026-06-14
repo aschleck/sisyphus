@@ -10,9 +10,9 @@ def sisyphus_pushable(
         binary_repository,
         config_entrypoint,
         remote_tags,
-        deps = [],
+        config_deps = [],
+        config_srcs = [],
         platforms = None,
-        srcs = [],
         tags = None):
     # Make the binary
     binary_multiarch = name + "_binary_multiarch"
@@ -72,7 +72,7 @@ def sisyphus_pushable(
     tar(
         name = config_files_tar,
         compress = "gzip",
-        srcs = srcs + deps + [
+        srcs = config_srcs + config_deps + [
             config_entrypoint,
         ],
     )
