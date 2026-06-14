@@ -266,7 +266,10 @@ fn port_app(ports: &[(&str, Option<u16>)]) -> Application {
         args: Vec::new(),
         env,
         labels: BTreeMap::new(),
+        liveness: None,
+        readiness: None,
         resources: Resources::default(),
+        startup: None,
     }
 }
 
@@ -313,7 +316,10 @@ fn test_assign_ports_conflicting_number_for_name_errors() {
             })),
         )]),
         labels: BTreeMap::new(),
+        liveness: None,
+        readiness: None,
         resources: Resources::default(),
+        startup: None,
     };
     let err = assign_ports(&app, "prod").unwrap_err().to_string();
     assert!(err.contains("conflicting numbers"), "{}", err);

@@ -111,6 +111,11 @@ Sisyphus sets the `app.kubernetes.io/name` label from the resource's name and us
 `Deployment` and `Service` selector. You can't override it. Any other `labels` you pass land on the
 object metadata and the pod template, but never on the selector.
 
+`liveness`, `readiness`, and `startup` each accept a probe. `HttpGetProbe` is currently the only
+probe type. It takes a `path` and a `port`; the `port` must name one of the ports your app declares.
+`initial_delay`, `period`, `timeout`, `success_threshold`, and `failure_threshold` are optional and
+map to the matching Kubernetes fields. Probes only apply to `Deployment`s.
+
 `ctx` has two methods:
 * `ctx.name()` provides the resource's name (taken from the yaml metadata)
 * `ctx.namespace()` provides the resource's namespace

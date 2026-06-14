@@ -33,7 +33,10 @@ pub(crate) struct Application {
     pub args: Vec<ArgumentValues>,
     pub env: BTreeMap<String, ArgumentValues>,
     pub labels: BTreeMap<String, String>,
+    pub liveness: Option<Probe>,
+    pub readiness: Option<Probe>,
     pub resources: Resources,
+    pub startup: Option<Probe>,
 }
 
 impl fmt::Display for Application {
@@ -128,15 +131,12 @@ pub(crate) struct Port {
 
 impl fmt::Display for Port {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
-        let number = self
-            .number
-            .map(|n| n.to_string())
-            .unwrap_or_else(|| "auto".to_string());
-        write!(
-            f,
-            "Port(name={}, number={}, protocol={})",
-            self.name, number, self.protocol
-        )
+        let mut args = vec![format!("name={}", self.name)];
+        if let Some(number) = self.number {
+            args.push(format!("number={}", number));
+        }
+        args.push(format!("protocol={}", self.protocol));
+        write!(f, "Port({})", args.join(", "))
     }
 }
 
@@ -161,6 +161,47 @@ impl fmt::Display for Protocol {
 
 #[starlark_value(type = "Port", UnpackValue, StarlarkTypeRepr)]
 impl<'v> StarlarkValue<'v> for Port {}
+
+#[derive(Allocative, Clone, Debug)]
+pub(crate) enum ProbeAction {
+    HttpGet { path: String, port: String },
+}
+
+#[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
+pub(crate) struct Probe {
+    pub action: ProbeAction,
+    pub initial_delay_seconds: Option<i32>,
+    pub period_seconds: Option<i32>,
+    pub timeout_seconds: Option<i32>,
+    pub success_threshold: Option<i32>,
+    pub failure_threshold: Option<i32>,
+}
+
+impl fmt::Display for Probe {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let (name, mut args) = match &self.action {
+            ProbeAction::HttpGet { path, port } => (
+                "HttpGetProbe",
+                vec![format!("path={}", path), format!("port={}", port)],
+            ),
+        };
+        for (field, value) in [
+            ("initial_delay", self.initial_delay_seconds),
+            ("period", self.period_seconds),
+            ("timeout", self.timeout_seconds),
+            ("success_threshold", self.success_threshold),
+            ("failure_threshold", self.failure_threshold),
+        ] {
+            if let Some(value) = value {
+                args.push(format!("{}={}", field, value));
+            }
+        }
+        write!(f, "{}({})", name, args.join(", "))
+    }
+}
+
+#[starlark_value(type = "Probe", UnpackValue, StarlarkTypeRepr)]
+impl<'v> StarlarkValue<'v> for Probe {}
 
 #[derive(Allocative, Clone, Debug, Default, NoSerialize, ProvidesStaticType)]
 pub(crate) struct Resources {
@@ -201,7 +242,10 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
         #[starlark(require = named)] args: Option<Value>,
         #[starlark(require = named)] env: Option<Value>,
         #[starlark(require = named)] labels: Option<Value>,
+        #[starlark(require = named)] liveness: Option<Value>,
+        #[starlark(require = named)] readiness: Option<Value>,
         #[starlark(require = named)] resources: Option<Value>,
+        #[starlark(require = named)] startup: Option<Value>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
         let args_value = match args {
@@ -216,6 +260,8 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
             Some(l) => unpack_string_map("labels", l)?,
             None => BTreeMap::new(),
         };
+        let liveness_value = unpack_probe("liveness", liveness)?;
+        let readiness_value = unpack_probe("readiness", readiness)?;
         let resources_value = match resources {
             Some(r) => r
                 .downcast_ref::<Resources>()
@@ -223,11 +269,15 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
                 .clone(),
             None => Resources::default(),
         };
+        let startup_value = unpack_probe("startup", startup)?;
         Ok(eval.heap().alloc_simple(Application {
             args: args_value,
             env: env_value,
             labels: labels_value,
+            liveness: liveness_value,
+            readiness: readiness_value,
             resources: resources_value,
+            startup: startup_value,
         }))
     }
 
@@ -287,6 +337,34 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
             name: name_str,
             number: number_value,
             protocol,
+        }))
+    }
+
+    fn HttpGetProbe<'v>(
+        #[starlark(require = named)] path: Value,
+        #[starlark(require = named)] port: Value,
+        #[starlark(require = named)] initial_delay: Option<Value>,
+        #[starlark(require = named)] period: Option<Value>,
+        #[starlark(require = named)] timeout: Option<Value>,
+        #[starlark(require = named)] success_threshold: Option<Value>,
+        #[starlark(require = named)] failure_threshold: Option<Value>,
+        eval: &mut Evaluator<'v, '_, '_>,
+    ) -> starlark::Result<Value<'v>> {
+        let path = path
+            .unpack_str()
+            .ok_or_else(|| function_error("path must be a str"))?
+            .to_string();
+        let port = port
+            .unpack_str()
+            .ok_or_else(|| function_error("port must be a str"))?
+            .to_string();
+        Ok(eval.heap().alloc_simple(Probe {
+            action: ProbeAction::HttpGet { path, port },
+            initial_delay_seconds: unpack_optional_i32("initial_delay", initial_delay)?,
+            period_seconds: unpack_optional_i32("period", period)?,
+            timeout_seconds: unpack_optional_i32("timeout", timeout)?,
+            success_threshold: unpack_optional_i32("success_threshold", success_threshold)?,
+            failure_threshold: unpack_optional_i32("failure_threshold", failure_threshold)?,
         }))
     }
 
@@ -452,6 +530,27 @@ fn unpack_string_map(name: &str, source: Value) -> starlark::Result<BTreeMap<Str
     UnpackDictEntries::<String, String>::unpack_value(source)?
         .ok_or_else(|| function_error(format!("{} must be a dict of str to str", name)))
         .map(|d| d.entries.into_iter().collect())
+}
+
+fn unpack_optional_i32(name: &str, value: Option<Value>) -> starlark::Result<Option<i32>> {
+    match value {
+        Some(v) => Ok(Some(
+            v.unpack_i32()
+                .ok_or_else(|| function_error(format!("{} must be an integer", name)))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+fn unpack_probe(name: &str, value: Option<Value>) -> starlark::Result<Option<Probe>> {
+    match value {
+        Some(v) if !v.is_none() => Ok(Some(
+            v.downcast_ref::<Probe>()
+                .ok_or_else(|| function_error(format!("{} must be a Probe object", name)))?
+                .clone(),
+        )),
+        _ => Ok(None),
+    }
 }
 
 fn unpack_vec(name: &str, source: Value) -> starlark::Result<Vec<ArgumentValues>> {

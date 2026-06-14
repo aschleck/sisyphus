@@ -867,3 +867,97 @@ fn test_build_pod_spec_restart_policy() {
     let pod_spec = build_pod_spec(container, "Always", Vec::new());
     assert_eq!(pod_spec.restart_policy, Some("Always".to_string()));
 }
+
+fn probe(path: &str, port: &str) -> Probe {
+    Probe {
+        action: ProbeAction::HttpGet {
+            path: path.to_string(),
+            port: port.to_string(),
+        },
+        initial_delay_seconds: None,
+        period_seconds: None,
+        timeout_seconds: None,
+        success_threshold: None,
+        failure_threshold: None,
+    }
+}
+
+fn app_with_metadata_port(liveness: Option<Probe>, readiness: Option<Probe>) -> Application {
+    Application {
+        args: Vec::new(),
+        env: BTreeMap::from([(
+            "PORT_METADATA".to_string(),
+            ArgumentValues::Uniform(Argument::Port(Port {
+                name: "metadata".to_string(),
+                number: None,
+                protocol: Protocol::TCP,
+            })),
+        )]),
+        labels: BTreeMap::new(),
+        liveness,
+        readiness,
+        resources: crate::config_image::Resources::default(),
+        startup: None,
+    }
+}
+
+fn test_index() -> ConfigImageIndex {
+    ConfigImageIndex {
+        binary_digest: "sha256:abc".to_string(),
+        binary_repository: "repo".to_string(),
+        config_entrypoint: "config.star".to_string(),
+    }
+}
+
+#[test]
+fn test_build_container_config_renders_probes() -> Result<()> {
+    let app = app_with_metadata_port(
+        Some(probe("/healthz", "metadata")),
+        Some(probe("/readyz", "metadata")),
+    );
+    let (container, _, _) =
+        build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new())?;
+
+    let liveness = container.liveness_probe.expect("liveness probe");
+    let http_get = liveness.http_get.expect("http get");
+    assert_eq!(http_get.path, Some("/healthz".to_string()));
+    assert_eq!(http_get.port, IntOrString::String("metadata".to_string()));
+    assert!(container.readiness_probe.is_some());
+    // Startup was not set, so it should be absent.
+    assert!(container.startup_probe.is_none());
+    Ok(())
+}
+
+#[test]
+fn test_build_container_config_probe_unknown_port_errors() {
+    let app = app_with_metadata_port(Some(probe("/healthz", "nope")), None);
+    let result = build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new());
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("does not declare"), "{}", err);
+}
+
+#[test]
+fn test_build_container_config_probe_timing_fields() -> Result<()> {
+    let liveness = Probe {
+        action: ProbeAction::HttpGet {
+            path: "/healthz".to_string(),
+            port: "metadata".to_string(),
+        },
+        initial_delay_seconds: Some(5),
+        period_seconds: Some(10),
+        timeout_seconds: Some(3),
+        success_threshold: Some(1),
+        failure_threshold: Some(6),
+    };
+    let app = app_with_metadata_port(Some(liveness), None);
+    let (container, _, _) =
+        build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new())?;
+
+    let probe = container.liveness_probe.expect("liveness probe");
+    assert_eq!(probe.initial_delay_seconds, Some(5));
+    assert_eq!(probe.period_seconds, Some(10));
+    assert_eq!(probe.timeout_seconds, Some(3));
+    assert_eq!(probe.success_threshold, Some(1));
+    assert_eq!(probe.failure_threshold, Some(6));
+    Ok(())
+}

@@ -1,7 +1,7 @@
 use crate::{
     config_image::{
         assign_ports, get_config, Application, Argument, ArgumentValues, ConfigImageIndex,
-        FileVariable,
+        FileVariable, Probe, ProbeAction,
     },
     kubernetes_io::KubernetesKey,
     registry_clients::RegistryClients,
@@ -15,9 +15,10 @@ use k8s_openapi::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
-            Container, ContainerPort, EnvVar, EnvVarSource, KeyToPath, PodSecurityContext, PodSpec,
-            PodTemplateSpec, ResourceRequirements, SecretKeySelector, SecretVolumeSource, Service,
-            ServicePort, ServiceSpec, Volume, VolumeMount,
+            Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, KeyToPath,
+            PodSecurityContext, PodSpec, PodTemplateSpec, Probe as KubeProbe, ResourceRequirements,
+            SecretKeySelector, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
+            VolumeMount,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -63,6 +64,17 @@ pub(crate) async fn render_sisyphus_resource(
                 maybe_namespace,
             )?
             .metadata;
+
+            // Probes don't apply to CronJobs, whose pods run to completion.
+            if application.liveness.is_some()
+                || application.readiness.is_some()
+                || application.startup.is_some()
+            {
+                bail!(
+                    "{} is a CronJob, which can't have liveness, readiness, or startup probes",
+                    v.metadata.name
+                );
+            }
 
             let (container, _, volumes) = build_container_config(
                 &v.metadata.name,
@@ -439,12 +451,49 @@ fn build_container_config(
         container.volume_mounts = Some(volume_mounts);
     }
 
+    if let Some(probe) = &application.liveness {
+        container.liveness_probe = Some(build_probe(probe, &port_numbers)?);
+    }
+    if let Some(probe) = &application.readiness {
+        container.readiness_probe = Some(build_probe(probe, &port_numbers)?);
+    }
+    if let Some(probe) = &application.startup {
+        container.startup_probe = Some(build_probe(probe, &port_numbers)?);
+    }
+
     // Set some defaults
     container.image_pull_policy = Some("IfNotPresent".to_string());
     container.termination_message_path = Some("/dev/termination-log".to_string());
     container.termination_message_policy = Some("File".to_string());
 
     Ok((container, ports, volumes))
+}
+
+fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<KubeProbe> {
+    let mut kube_probe = KubeProbe {
+        initial_delay_seconds: probe.initial_delay_seconds,
+        period_seconds: probe.period_seconds,
+        timeout_seconds: probe.timeout_seconds,
+        success_threshold: probe.success_threshold,
+        failure_threshold: probe.failure_threshold,
+        ..Default::default()
+    };
+    match &probe.action {
+        ProbeAction::HttpGet { path, port } => {
+            if !port_numbers.contains_key(port) {
+                bail!(
+                    "Probe references port {:?} which the application does not declare",
+                    port
+                );
+            }
+            kube_probe.http_get = Some(HTTPGetAction {
+                path: Some(path.clone()),
+                port: IntOrString::String(port.clone()),
+                ..Default::default()
+            });
+        }
+    }
+    Ok(kube_probe)
 }
 
 fn build_pod_spec(container: Container, restart_policy: &str, volumes: Vec<Volume>) -> PodSpec {
