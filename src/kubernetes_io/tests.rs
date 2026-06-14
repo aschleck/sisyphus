@@ -82,6 +82,19 @@ fn test_copy_unmanaged_fields_object_with_managed_fields() -> Result<()> {
 }
 
 #[test]
+fn test_copy_unmanaged_fields_object_drops_removed_managed_key() -> Result<()> {
+    // A managed key present in have but absent from want is dropped, not emitted as a null value,
+    // so the merged object can deserialize back into a typed object whose maps reject nulls.
+    let have = json!({"app.kubernetes.io/name": "echo", "april.dev/app": "echo"});
+    let want = json!({"app.kubernetes.io/name": "echo"});
+    let managed = json!({"f:april.dev/app": {}});
+
+    let merged = copy_unmanaged_fields(&have, &want, &managed)?;
+    assert_eq!(merged, json!({"app.kubernetes.io/name": "echo"}));
+    Ok(())
+}
+
+#[test]
 fn test_copy_unmanaged_fields_object_null_managed() -> Result<()> {
     let have = json!({"key1": "value1"});
     let want = json!({"key1": "updated", "key2": "new"});

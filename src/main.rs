@@ -557,7 +557,8 @@ async fn get_objects_from_database(pool: &AnyPool) -> Result<KubernetesResources
             },
             cluster: rec.get("cluster"),
         };
-        let object: DynamicObject = serde_yaml::from_str(rec.get("yaml"))?;
+        let object: DynamicObject = serde_yaml::from_str(rec.get("yaml"))
+            .with_context(|| format!("Failed to parse stored yaml for {:?}", key))?;
         if key.api_version == "v1" && key.kind == "Namespace" {
             resources.namespaces.insert(key, object);
         } else {

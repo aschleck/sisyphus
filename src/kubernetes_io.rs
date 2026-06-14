@@ -1,4 +1,4 @@
-use anyhow::{anyhow, bail, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use kube::{
     api::{ApiResource, DynamicObject},
     config::KubeConfigOptions,
@@ -185,7 +185,12 @@ fn copy_unmanaged_fields(
                 let m = managed.get(&format!("f:{}", k)).unwrap_or(&JsonValue::Null);
                 let new_value =
                     copy_unmanaged_fields(v, &remaining.remove(k).unwrap_or(JsonValue::Null), m)?;
-                copy.insert(k.clone(), new_value);
+                // A managed field we no longer set merges to null. Drop it instead of emitting the
+                // null: server-side apply prunes fields we own but omit, and a null left in the map
+                // would fail to deserialize back into a typed object (whose maps hold only strings).
+                if !new_value.is_null() {
+                    copy.insert(k.clone(), new_value);
+                }
             }
             for (k, v) in remaining {
                 copy.insert(k.clone(), v.clone());
@@ -203,7 +208,10 @@ fn copy_unmanaged_fields(
                     &remaining.remove(k).unwrap_or(JsonValue::Null),
                     &JsonValue::Null,
                 )?;
-                copy.insert(k.clone(), new_value);
+                // Keep the map free of nulls so it stays deserializable into typed objects.
+                if !new_value.is_null() {
+                    copy.insert(k.clone(), new_value);
+                }
             }
             for (k, v) in remaining {
                 copy.insert(k, v);
@@ -313,7 +321,8 @@ fn copy_single_unspecified_data(
             &serde_json::to_value(&mut *want)?,
             &hm,
         )?;
-        *want = serde_json::from_value(copied)?;
+        *want = serde_json::from_value(copied)
+            .context("Failed to rebuild object after merging managed fields")?;
 
         h.metadata.managed_fields = None;
         want.metadata.managed_fields = None;
