@@ -1,12 +1,12 @@
 use crate::{
     app_run_config::resolve_argument_local,
-    config_image::{Application, Argument, ArgumentValues},
+    config_image::{assign_ports, Application, Argument, ArgumentValues},
     kubernetes_rendering::prepare_image_config,
     registry_clients::{resolve_image_tag, RegistryClients},
 };
 use anyhow::{Context, Result};
 use clap::Args;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tokio::process::Command;
 
 #[derive(Args, Debug)]
@@ -50,11 +50,13 @@ pub async fn run_image(args: RunImageArgs) -> Result<()> {
 }
 
 fn build_config_container(app: &Application, environment: &str) -> Result<ContainerConfig> {
+    let port_numbers = assign_ports(app, environment)?;
+
     let mut mounts = Vec::new();
     let mut ports = Vec::new();
     let mut cmd_args = Vec::new();
     for arg_val in &app.args {
-        if let Some(resolved) = resolve_argument_container(arg_val, environment)? {
+        if let Some(resolved) = resolve_argument_container(arg_val, environment, &port_numbers)? {
             match resolved {
                 ResolvedArgument::Port(s) => {
                     cmd_args.push(s.clone());
@@ -74,7 +76,7 @@ fn build_config_container(app: &Application, environment: &str) -> Result<Contai
 
     let mut env_vars = HashMap::new();
     for (key, arg_val) in &app.env {
-        if let Some(resolved) = resolve_argument_container(arg_val, environment)? {
+        if let Some(resolved) = resolve_argument_container(arg_val, environment, &port_numbers)? {
             match resolved {
                 ResolvedArgument::Port(s) => {
                     env_vars.insert(key.clone(), s.clone());
@@ -117,8 +119,9 @@ async fn load_config_from_image(
 fn resolve_argument_container(
     arg: &ArgumentValues,
     environment: &str,
+    port_numbers: &BTreeMap<String, u16>,
 ) -> Result<Option<ResolvedArgument>> {
-    let Some((arg, value)) = resolve_argument_local(arg, environment)? else {
+    let Some((arg, value)) = resolve_argument_local(arg, environment, port_numbers)? else {
         return Ok(None);
     };
     Ok(Some(match arg {

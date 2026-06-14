@@ -1,11 +1,11 @@
 use crate::{
-    config_image::{Application, Argument, ArgumentValues},
+    config_image::{assign_ports, Application, Argument, ArgumentValues},
     starlark::load_starlark_config,
 };
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use clap::Args;
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     path::{Path, PathBuf},
 };
 use tokio::process::Command;
@@ -47,16 +47,18 @@ fn build_config_local(
     app: &Application,
     environment: &str,
 ) -> Result<(Vec<String>, HashMap<String, String>)> {
+    let port_numbers = assign_ports(app, environment)?;
+
     let mut args = Vec::new();
     for arg_val in &app.args {
-        if let Some((_, resolved)) = resolve_argument_local(arg_val, environment)? {
+        if let Some((_, resolved)) = resolve_argument_local(arg_val, environment, &port_numbers)? {
             args.push(resolved);
         }
     }
 
     let mut env = HashMap::new();
     for (key, arg_val) in &app.env {
-        if let Some((_, resolved)) = resolve_argument_local(arg_val, environment)? {
+        if let Some((_, resolved)) = resolve_argument_local(arg_val, environment, &port_numbers)? {
             env.insert(key.clone(), resolved);
         }
     }
@@ -67,6 +69,7 @@ fn build_config_local(
 pub(crate) fn resolve_argument_local<'a>(
     arg: &'a ArgumentValues,
     environment: &str,
+    port_numbers: &BTreeMap<String, u16>,
 ) -> Result<Option<(&'a Argument, String)>> {
     let maybe = match arg {
         ArgumentValues::Varying(map) => map.get(environment),
@@ -89,7 +92,10 @@ pub(crate) fn resolve_argument_local<'a>(
                 let env_var_name = format!("PORT_{}", as_env_key(&p.name));
                 match std::env::var(&env_var_name) {
                     Ok(val) => val,
-                    Err(_) => p.number.to_string(),
+                    Err(_) => port_numbers
+                        .get(&p.name)
+                        .ok_or_else(|| anyhow!("Port {} was not assigned a number", p.name))?
+                        .to_string(),
                 }
             }
             Argument::StringVariable(v) => {

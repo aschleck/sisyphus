@@ -1,6 +1,7 @@
 use crate::{
     config_image::{
-        get_config, Application, Argument, ArgumentValues, ConfigImageIndex, FileVariable,
+        assign_ports, get_config, Application, Argument, ArgumentValues, ConfigImageIndex,
+        FileVariable,
     },
     kubernetes_io::KubernetesKey,
     registry_clients::RegistryClients,
@@ -262,6 +263,7 @@ fn build_base_deployment_spec(
 fn render_container_args(
     application_args: &[ArgumentValues],
     config_env: &str,
+    port_numbers: &BTreeMap<String, u16>,
     ports: &mut BTreeMap<String, ContainerPort>,
     config_vars: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
@@ -269,7 +271,15 @@ fn render_container_args(
 ) -> Result<Vec<String>> {
     let mut args = Vec::new();
     for arg in application_args {
-        let maybe = render_argument(arg, config_env, ports, config_vars, volumes, volume_mounts)?;
+        let maybe = render_argument(
+            arg,
+            config_env,
+            port_numbers,
+            ports,
+            config_vars,
+            volumes,
+            volume_mounts,
+        )?;
         let Some(rendered) = maybe else {
             continue;
         };
@@ -284,6 +294,7 @@ fn render_container_args(
 fn render_container_env_vars(
     application_env: &BTreeMap<String, ArgumentValues>,
     config_env: &str,
+    port_numbers: &BTreeMap<String, u16>,
     ports: &mut BTreeMap<String, ContainerPort>,
     config_vars: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
@@ -294,6 +305,7 @@ fn render_container_env_vars(
         let maybe = render_argument(
             value,
             config_env,
+            port_numbers,
             ports,
             config_vars,
             volumes,
@@ -320,6 +332,7 @@ fn render_container_env_vars(
 fn render_resource_requirements_map(
     resource_map: &BTreeMap<String, ArgumentValues>,
     config_env: &str,
+    port_numbers: &BTreeMap<String, u16>,
     ports: &mut BTreeMap<String, ContainerPort>,
     config_vars: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
@@ -330,6 +343,7 @@ fn render_resource_requirements_map(
         let maybe = render_argument(
             value,
             config_env,
+            port_numbers,
             ports,
             config_vars,
             volumes,
@@ -365,9 +379,12 @@ fn build_container_config(
     let mut volumes = Vec::new();
     let mut volume_mounts = Vec::new();
 
+    let port_numbers = assign_ports(application, config_env)?;
+
     let args = render_container_args(
         &application.args,
         config_env,
+        &port_numbers,
         &mut ports,
         config_vars,
         &mut volumes,
@@ -380,6 +397,7 @@ fn build_container_config(
     let env_vars = render_container_env_vars(
         &application.env,
         config_env,
+        &port_numbers,
         &mut ports,
         config_vars,
         &mut volumes,
@@ -394,6 +412,7 @@ fn build_container_config(
         resources.requests = Some(render_resource_requirements_map(
             &application.resources.requests,
             config_env,
+            &port_numbers,
             &mut ports,
             config_vars,
             &mut volumes,
@@ -404,6 +423,7 @@ fn build_container_config(
         resources.limits = Some(render_resource_requirements_map(
             &application.resources.limits,
             config_env,
+            &port_numbers,
             &mut ports,
             config_vars,
             &mut volumes,
@@ -601,6 +621,7 @@ enum RenderedArgument {
 fn render_argument(
     arg: &ArgumentValues,
     selector: &str,
+    port_numbers: &BTreeMap<String, u16>,
     ports: &mut BTreeMap<String, ContainerPort>,
     variables: &BTreeMap<String, VariableSource>,
     volumes: &mut Vec<Volume>,
@@ -621,12 +642,15 @@ fn render_argument(
             render_file_variable(var, source, volumes, volume_mounts)?
         }
         Argument::Port(v) => {
+            let number = *port_numbers
+                .get(&v.name)
+                .ok_or_else(|| anyhow!("Port {} was not assigned a number", v.name))?;
             let mut port = ContainerPort::default();
             port.name = Some(v.name.clone());
-            port.container_port = v.number.into();
+            port.container_port = number.into();
             port.protocol = Some(format!("{}", v.protocol));
             ports.insert(v.name.clone(), port);
-            RenderedArgument::String(v.number.to_string())
+            RenderedArgument::String(number.to_string())
         }
         Argument::String(v) => RenderedArgument::String(v.clone()),
         Argument::StringVariable(v) => {

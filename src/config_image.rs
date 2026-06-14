@@ -1,5 +1,5 @@
 use allocative::Allocative;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::Deserialize;
 use starlark::{
     any::ProvidesStaticType,
@@ -11,7 +11,12 @@ use starlark::{
         starlark_value, NoSerialize, StarlarkValue, UnpackValue, Value, ValueLike,
     },
 };
-use std::{collections::BTreeMap, convert::TryInto, fmt, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::TryInto,
+    fmt,
+    path::Path,
+};
 
 #[cfg(test)]
 mod tests;
@@ -117,16 +122,20 @@ impl<'v> StarlarkValue<'v> for FileVariable {}
 #[derive(Allocative, Clone, Debug, NoSerialize, ProvidesStaticType)]
 pub(crate) struct Port {
     pub name: String,
-    pub number: u16,
+    pub number: Option<u16>,
     pub protocol: Protocol,
 }
 
 impl fmt::Display for Port {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        let number = self
+            .number
+            .map(|n| n.to_string())
+            .unwrap_or_else(|| "auto".to_string());
         write!(
             f,
             "Port(name={}, number={}, protocol={})",
-            self.name, self.number, self.protocol
+            self.name, number, self.protocol
         )
     }
 }
@@ -241,7 +250,7 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
 
     fn Port<'v>(
         #[starlark(require = named)] name: Value,
-        #[starlark(require = named)] number: Value,
+        #[starlark(require = named)] number: Option<Value>,
         #[starlark(require = named)] protocol: Option<Value>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
@@ -249,12 +258,19 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
             .unpack_str()
             .ok_or_else(|| function_error("name must be a str"))?
             .to_string();
-        let as_i32 = number
-            .unpack_i32()
-            .ok_or_else(|| function_error("number must be an integer"))?;
-        let as_u16: u16 = as_i32
-            .try_into()
-            .map_err(|_| function_error("number must be a u16"))?;
+        let number_value = match number {
+            Some(n) => {
+                let as_i32 = n
+                    .unpack_i32()
+                    .ok_or_else(|| function_error("number must be an integer"))?;
+                Some(
+                    as_i32
+                        .try_into()
+                        .map_err(|_| function_error("number must be a u16"))?,
+                )
+            }
+            None => None,
+        };
         let protocol = match protocol {
             Some(n) => match n
                 .unpack_str()
@@ -269,7 +285,7 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
 
         Ok(eval.heap().alloc_simple(Port {
             name: name_str,
-            number: as_u16,
+            number: number_value,
             protocol,
         }))
     }
@@ -318,6 +334,87 @@ pub(crate) async fn get_config(
     let application =
         crate::starlark::load_starlark_config(root, &config_path, name, namespace).await?;
     Ok((index, application))
+}
+
+// The first port number handed out by auto-assignment.
+const BASE_PORT: u16 = 8080;
+
+// Resolves a concrete number for every port the application exposes in `environment`. Ports with an
+// explicit number keep it; the rest are auto-assigned deterministically (sorted by name, counting up
+// from BASE_PORT and skipping numbers already taken). Returns an error if a name is declared with
+// conflicting numbers or if two ports want the same number.
+pub(crate) fn assign_ports(
+    application: &Application,
+    environment: &str,
+) -> Result<BTreeMap<String, u16>> {
+    let mut names: BTreeSet<String> = BTreeSet::new();
+    let mut assigned: BTreeMap<String, u16> = BTreeMap::new();
+    let values = application
+        .args
+        .iter()
+        .chain(application.env.values())
+        .chain(application.resources.requests.values())
+        .chain(application.resources.limits.values());
+    for value in values {
+        collect_port(value, environment, &mut names, &mut assigned)?;
+    }
+
+    let mut owners: BTreeMap<u16, &str> = BTreeMap::new();
+    for (name, number) in &assigned {
+        if let Some(other) = owners.insert(*number, name) {
+            bail!(
+                "Ports {} and {} both request number {}",
+                other,
+                name,
+                number
+            );
+        }
+    }
+
+    let mut used: BTreeSet<u16> = assigned.values().copied().collect();
+    let mut next = BASE_PORT;
+    for name in &names {
+        if assigned.contains_key(name) {
+            continue;
+        }
+        while used.contains(&next) {
+            next += 1;
+        }
+        used.insert(next);
+        assigned.insert(name.clone(), next);
+        next += 1;
+    }
+
+    Ok(assigned)
+}
+
+fn collect_port(
+    values: &ArgumentValues,
+    environment: &str,
+    names: &mut BTreeSet<String>,
+    assigned: &mut BTreeMap<String, u16>,
+) -> Result<()> {
+    let resolved = match values {
+        ArgumentValues::Uniform(a) => Some(a),
+        ArgumentValues::Varying(m) => m.get(environment),
+    };
+    if let Some(Argument::Port(port)) = resolved {
+        names.insert(port.name.clone());
+        if let Some(number) = port.number {
+            match assigned.get(&port.name) {
+                Some(existing) if *existing != number => bail!(
+                    "Port {} is declared with conflicting numbers {} and {}",
+                    port.name,
+                    existing,
+                    number
+                ),
+                _ => {
+                    assigned.insert(port.name.clone(), number);
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn function_error(message: impl AsRef<str>) -> starlark::Error {

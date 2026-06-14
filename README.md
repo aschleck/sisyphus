@@ -69,8 +69,8 @@ def main(ctx):
                 FileVariable(name="google-credentials", path="/etc/google/credentials.json")
             ),
             "HTTP_PORT": {
-                "prod": Port(name="http", number=80),
-                "test": Port(name="http", number=80),
+                "prod": Port(name="http"),
+                "test": Port(name="http"),
                 "dev": Port(name="http", number=8080, protocol="TCP"),  # protocol defaults to TCP
             },
         },
@@ -101,8 +101,11 @@ This file defines the configuration the binary should run with. Values can eithe
 directly or a dictionary can be passed with different values per environment. Values like secrets
 are received using `StringVariable`s and are defined in the yaml in the next section. `FileVariable`
 is like a `StringVariable` but ensures the value of the string is mounted in the container at the
-specified path. `Port` is a special marker that ensures the ports are exposed in the Kubernetes
-deployment object and are available for use by Kubernetes `Service`s.
+specified path.
+
+`Port` ensures the ports are exposed in the Kubernetes deployment object and are available for use
+by Kubernetes `Service`s. `number` is optional: when omitted, Sisyphus deterministically assigns a
+number (counting up from 8080).
 
 Sisyphus sets the `app.kubernetes.io/name` label from the resource's name and uses it as the only
 `Deployment` and `Service` selector. You can't override it. Any other `labels` you pass land on the

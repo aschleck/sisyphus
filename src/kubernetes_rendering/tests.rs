@@ -606,6 +606,7 @@ fn test_build_service_spec_with_ports() -> Result<()> {
 fn test_render_argument_string() -> Result<()> {
     let arg = ArgumentValues::Uniform(Argument::String("test-value".to_string()));
     let selector = "prod";
+    let port_numbers = BTreeMap::new();
     let mut ports = BTreeMap::new();
     let variables = BTreeMap::new();
     let mut volumes = Vec::new();
@@ -614,6 +615,7 @@ fn test_render_argument_string() -> Result<()> {
     let result = render_argument(
         &arg,
         selector,
+        &port_numbers,
         &mut ports,
         &variables,
         &mut volumes,
@@ -631,11 +633,12 @@ fn test_render_argument_string() -> Result<()> {
 fn test_render_argument_port() -> Result<()> {
     let port = Port {
         name: "http".to_string(),
-        number: 8080,
+        number: Some(8080),
         protocol: Protocol::TCP,
     };
     let arg = ArgumentValues::Uniform(Argument::Port(port));
     let selector = "prod";
+    let port_numbers = BTreeMap::from([("http".to_string(), 8080u16)]);
     let mut ports = BTreeMap::new();
     let variables = BTreeMap::new();
     let mut volumes = Vec::new();
@@ -644,6 +647,7 @@ fn test_render_argument_port() -> Result<()> {
     let result = render_argument(
         &arg,
         selector,
+        &port_numbers,
         &mut ports,
         &variables,
         &mut volumes,
@@ -673,6 +677,7 @@ fn test_render_argument_varying() -> Result<()> {
 
     let arg = ArgumentValues::Varying(varying_map);
     let selector = "prod";
+    let port_numbers = BTreeMap::new();
     let mut ports = BTreeMap::new();
     let variables = BTreeMap::new();
     let mut volumes = Vec::new();
@@ -681,6 +686,7 @@ fn test_render_argument_varying() -> Result<()> {
     let result = render_argument(
         &arg,
         selector,
+        &port_numbers,
         &mut ports,
         &variables,
         &mut volumes,
@@ -703,6 +709,7 @@ fn test_render_argument_varying_not_found() -> Result<()> {
 
     let arg = ArgumentValues::Varying(varying_map);
     let selector = "dev"; // Not in the map
+    let port_numbers = BTreeMap::new();
     let mut ports = BTreeMap::new();
     let variables = BTreeMap::new();
     let mut volumes = Vec::new();
@@ -711,6 +718,7 @@ fn test_render_argument_varying_not_found() -> Result<()> {
     let result = render_argument(
         &arg,
         selector,
+        &port_numbers,
         &mut ports,
         &variables,
         &mut volumes,

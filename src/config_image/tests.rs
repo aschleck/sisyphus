@@ -21,7 +21,7 @@ fn test_starlark_port_creation() -> anyhow::Result<()> {
 
     let port = result.downcast_ref::<Port>().unwrap();
     assert_eq!(port.name, "http");
-    assert_eq!(port.number, 8080);
+    assert_eq!(port.number, Some(8080));
     assert!(matches!(port.protocol, Protocol::TCP));
 
     Ok(())
@@ -246,4 +246,75 @@ fn test_config_image_index_deserialization() -> anyhow::Result<()> {
     assert_eq!(index.config_entrypoint, "config.star");
 
     Ok(())
+}
+
+fn port_app(ports: &[(&str, Option<u16>)]) -> Application {
+    let env = ports
+        .iter()
+        .map(|(name, number)| {
+            (
+                format!("PORT_{}", name.to_uppercase()),
+                ArgumentValues::Uniform(Argument::Port(Port {
+                    name: name.to_string(),
+                    number: *number,
+                    protocol: Protocol::TCP,
+                })),
+            )
+        })
+        .collect();
+    Application {
+        args: Vec::new(),
+        env,
+        labels: BTreeMap::new(),
+        resources: Resources::default(),
+    }
+}
+
+#[test]
+fn test_assign_ports_auto_sorted_from_base() -> anyhow::Result<()> {
+    let app = port_app(&[("b", None), ("a", None)]);
+    let assigned = assign_ports(&app, "prod")?;
+    assert_eq!(assigned.get("a"), Some(&8080));
+    assert_eq!(assigned.get("b"), Some(&8081));
+    Ok(())
+}
+
+#[test]
+fn test_assign_ports_skips_explicit() -> anyhow::Result<()> {
+    // The explicit 8080 should be kept, and the auto-assigned port should skip past it.
+    let app = port_app(&[("http", None), ("pinned", Some(8080))]);
+    let assigned = assign_ports(&app, "prod")?;
+    assert_eq!(assigned.get("pinned"), Some(&8080));
+    assert_eq!(assigned.get("http"), Some(&8081));
+    Ok(())
+}
+
+#[test]
+fn test_assign_ports_duplicate_number_errors() {
+    let app = port_app(&[("a", Some(8443)), ("b", Some(8443))]);
+    let err = assign_ports(&app, "prod").unwrap_err().to_string();
+    assert!(err.contains("both request number"), "{}", err);
+}
+
+#[test]
+fn test_assign_ports_conflicting_number_for_name_errors() {
+    let app = Application {
+        args: vec![ArgumentValues::Uniform(Argument::Port(Port {
+            name: "a".to_string(),
+            number: Some(8444),
+            protocol: Protocol::TCP,
+        }))],
+        env: BTreeMap::from([(
+            "PORT_A".to_string(),
+            ArgumentValues::Uniform(Argument::Port(Port {
+                name: "a".to_string(),
+                number: Some(8443),
+                protocol: Protocol::TCP,
+            })),
+        )]),
+        labels: BTreeMap::new(),
+        resources: Resources::default(),
+    };
+    let err = assign_ports(&app, "prod").unwrap_err().to_string();
+    assert!(err.contains("conflicting numbers"), "{}", err);
 }
