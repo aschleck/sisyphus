@@ -15,6 +15,11 @@ pub(crate) struct RunConfigArgs {
     #[arg(long)]
     pub binary: PathBuf,
 
+    // The root that `load("//...")` paths resolve against. Defaults to the current directory.
+    #[arg(long, default_value = ".")]
+    pub config_root: PathBuf,
+
+    // The entrypoint config, as a path relative to the current directory.
     #[arg(long)]
     pub config: PathBuf,
 
@@ -26,9 +31,14 @@ pub(crate) struct RunConfigArgs {
 }
 
 pub(crate) async fn run_config(args: RunConfigArgs) -> Result<()> {
-    let application = load_starlark_config(&args.config, args.namespace.as_deref())
-        .await
-        .with_context(|| format!("Failed to load config from {}", args.config.display()))?;
+    let application = load_starlark_config(
+        &args.config_root,
+        &args.config,
+        "local-app",
+        args.namespace.as_deref(),
+    )
+    .await
+    .with_context(|| format!("Failed to load config from {}", args.config.display()))?;
     let (cmd_args, env_vars) = build_config_local(&application, &args.environment)?;
     run_binary_local(&args.binary, cmd_args, env_vars).await
 }

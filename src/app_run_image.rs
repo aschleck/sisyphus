@@ -109,7 +109,7 @@ async fn load_config_from_image(
 ) -> Result<(String, Application)> {
     let reference = resolve_image_tag(image, registries).await?;
     let (index, application) =
-        prepare_image_config(&reference.to_string(), registries, namespace).await?;
+        prepare_image_config(&reference.to_string(), registries, "local-app", namespace).await?;
     let binary_image = format!("{}@{}", index.binary_repository, index.binary_digest);
     Ok((binary_image, application))
 }

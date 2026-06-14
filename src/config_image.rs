@@ -27,6 +27,7 @@ pub(crate) struct ConfigImageIndex {
 pub(crate) struct Application {
     pub args: Vec<ArgumentValues>,
     pub env: BTreeMap<String, ArgumentValues>,
+    pub labels: BTreeMap<String, String>,
     pub resources: Resources,
 }
 
@@ -190,6 +191,7 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
     fn Application<'v>(
         #[starlark(require = named)] args: Option<Value>,
         #[starlark(require = named)] env: Option<Value>,
+        #[starlark(require = named)] labels: Option<Value>,
         #[starlark(require = named)] resources: Option<Value>,
         eval: &mut Evaluator<'v, '_, '_>,
     ) -> starlark::Result<Value<'v>> {
@@ -199,6 +201,10 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
         };
         let env_value = match env {
             Some(e) => unpack_map("env", e)?,
+            None => BTreeMap::new(),
+        };
+        let labels_value = match labels {
+            Some(l) => unpack_string_map("labels", l)?,
             None => BTreeMap::new(),
         };
         let resources_value = match resources {
@@ -211,6 +217,7 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
         Ok(eval.heap().alloc_simple(Application {
             args: args_value,
             env: env_value,
+            labels: labels_value,
             resources: resources_value,
         }))
     }
@@ -301,13 +308,15 @@ fn starlark_types(builder: &mut GlobalsBuilder) {
 
 pub(crate) async fn get_config(
     root: &Path,
+    name: &str,
     namespace: Option<&str>,
 ) -> Result<(ConfigImageIndex, Application)> {
     let index_path = root.join("index.json");
     let index: ConfigImageIndex =
         serde_json::from_str(&tokio::fs::read_to_string(index_path).await?)?;
     let config_path = root.join(&index.config_entrypoint);
-    let application = crate::starlark::load_starlark_config(&config_path, namespace).await?;
+    let application =
+        crate::starlark::load_starlark_config(root, &config_path, name, namespace).await?;
     Ok((index, application))
 }
 
@@ -340,6 +349,12 @@ fn unpack_map(name: &str, source: Value) -> starlark::Result<BTreeMap<String, Ar
         .into_iter()
         .map(|(k, v)| ArgumentValues::unpack_value(v).map(|v| (k, v)))
         .collect::<starlark::Result<BTreeMap<_, _>>>()
+}
+
+fn unpack_string_map(name: &str, source: Value) -> starlark::Result<BTreeMap<String, String>> {
+    UnpackDictEntries::<String, String>::unpack_value(source)?
+        .ok_or_else(|| function_error(format!("{} must be a dict of str to str", name)))
+        .map(|d| d.entries.into_iter().collect())
 }
 
 fn unpack_vec(name: &str, source: Value) -> starlark::Result<Vec<ArgumentValues>> {

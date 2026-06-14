@@ -32,10 +32,11 @@ use tempfile::TempDir;
 #[cfg(test)]
 mod tests;
 
+const NAME_LABEL: &str = "app.kubernetes.io/name";
+
 pub(crate) async fn render_sisyphus_resource(
     object: &SisyphusResource,
     allow_any_namespace: bool,
-    label_namespace: &str,
     maybe_namespace: &Option<String>,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
     registries: &mut RegistryClients,
@@ -45,17 +46,22 @@ pub(crate) async fn render_sisyphus_resource(
             handle_kubernetes_yaml_resource(v, allow_any_namespace, maybe_namespace, by_key)?;
         }
         SisyphusResource::SisyphusCronJob(v) => {
-            let (index, application) =
-                prepare_image_config(&v.config.image, registries, maybe_namespace.as_deref())
-                    .await?;
+            let (index, application) = prepare_image_config(
+                &v.config.image,
+                registries,
+                &v.metadata.name,
+                maybe_namespace.as_deref(),
+            )
+            .await?;
 
             let metadata = render_deployment_metadata(
                 &v.metadata.name,
-                label_namespace,
+                &application.labels,
                 &v.metadata.labels,
                 &v.metadata.annotations,
                 maybe_namespace,
-            )?;
+            )?
+            .metadata;
 
             let (container, _, volumes) = build_container_config(
                 &v.metadata.name,
@@ -83,13 +89,17 @@ pub(crate) async fn render_sisyphus_resource(
             )?;
         }
         SisyphusResource::SisyphusDeployment(v) => {
-            let (index, application) =
-                prepare_image_config(&v.config.image, registries, maybe_namespace.as_deref())
-                    .await?;
-
-            let metadata = render_deployment_metadata(
+            let (index, application) = prepare_image_config(
+                &v.config.image,
+                registries,
                 &v.metadata.name,
-                label_namespace,
+                maybe_namespace.as_deref(),
+            )
+            .await?;
+
+            let RenderedMetadata { metadata, selector } = render_deployment_metadata(
+                &v.metadata.name,
+                &application.labels,
                 &v.metadata.labels,
                 &v.metadata.annotations,
                 maybe_namespace,
@@ -97,7 +107,8 @@ pub(crate) async fn render_sisyphus_resource(
             let labels = metadata.labels.clone().unwrap_or_default();
             let annotations = metadata.annotations.clone().unwrap_or_default();
 
-            let mut independent_spec = build_base_deployment_spec(labels.clone(), annotations);
+            let mut independent_spec =
+                build_base_deployment_spec(labels, selector.clone(), annotations);
 
             let (container, ports, volumes) = build_container_config(
                 &v.metadata.name,
@@ -109,8 +120,7 @@ pub(crate) async fn render_sisyphus_resource(
 
             independent_spec.template.spec = Some(build_pod_spec(container, "Always", volumes));
 
-            let service_spec_option =
-                build_service_spec(&v.config.service, &ports, labels.clone())?;
+            let service_spec_option = build_service_spec(&v.config.service, &ports, selector)?;
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -168,6 +178,7 @@ fn handle_kubernetes_yaml_resource(
 pub(crate) async fn prepare_image_config(
     image_config: &String,
     registries: &mut RegistryClients,
+    name: &str,
     namespace: Option<&str>,
 ) -> Result<(ConfigImageIndex, Application)> {
     let (image, registry) = registries.get_reference_and_registry(image_config).await?;
@@ -183,30 +194,36 @@ pub(crate) async fn prepare_image_config(
     let blobs = try_join_all(blob_futures).await?;
     let path = TempDir::new()?;
     containerRender::unpack(&blobs, path.path())?;
-    let (index, application) = get_config(path.path(), namespace).await?;
+    let (index, application) = get_config(path.path(), name, namespace).await?;
     Ok((index, application))
+}
+
+#[derive(Debug)]
+struct RenderedMetadata {
+    metadata: ObjectMeta,
+    selector: BTreeMap<String, String>,
 }
 
 fn render_deployment_metadata(
     deployment_name: &str,
-    label_namespace: &str,
+    application_labels: &BTreeMap<String, String>,
     deployment_labels: &BTreeMap<String, String>,
     deployment_annotations: &BTreeMap<String, String>,
     maybe_namespace: &Option<String>,
-) -> Result<ObjectMeta> {
-    let mut labels = deployment_labels.clone();
-    labels.insert(
-        format!("{}/app", label_namespace),
-        deployment_name.to_string(),
-    );
+) -> Result<RenderedMetadata> {
+    let mut labels = application_labels.clone();
+    labels.extend(deployment_labels.clone());
+    labels.insert(NAME_LABEL.to_string(), deployment_name.to_string());
+
+    // Sisyphus won't make any conflicting resources with this (ignoring KubernetesYaml) so a sole
+    // selector should be safe
+    let selector = BTreeMap::from([(NAME_LABEL.to_string(), deployment_name.to_string())]);
 
     let mut metadata = ObjectMeta::default();
     if deployment_annotations.len() > 0 {
         metadata.annotations = Some(deployment_annotations.clone());
     }
-    if labels.len() > 0 {
-        metadata.labels = Some(labels);
-    }
+    metadata.labels = Some(labels);
     metadata.name = Some(deployment_name.to_string());
     metadata.namespace = Some(
         maybe_namespace
@@ -214,15 +231,16 @@ fn render_deployment_metadata(
             .ok_or_else(|| anyhow!("Namespace must be explicit"))?
             .clone(),
     );
-    Ok(metadata)
+    Ok(RenderedMetadata { metadata, selector })
 }
 
 fn build_base_deployment_spec(
     labels: BTreeMap<String, String>,
+    selector: BTreeMap<String, String>,
     annotations: BTreeMap<String, String>,
 ) -> DeploymentSpec {
     let mut independent_spec = DeploymentSpec::default();
-    independent_spec.selector.match_labels = Some(labels.clone());
+    independent_spec.selector.match_labels = Some(selector);
     independent_spec.progress_deadline_seconds = Some(600);
     independent_spec.revision_history_limit = Some(10);
     independent_spec.strategy = Some(DeploymentStrategy {
@@ -428,10 +446,10 @@ fn build_pod_spec(container: Container, restart_policy: &str, volumes: Vec<Volum
 fn build_service_spec(
     config_service: &Option<DeploymentServiceConfig>,
     ports: &BTreeMap<String, ContainerPort>,
-    labels: BTreeMap<String, String>,
+    selector: BTreeMap<String, String>,
 ) -> Result<Option<ServiceSpec>> {
     let mut service_spec = ServiceSpec::default();
-    service_spec.selector = Some(labels);
+    service_spec.selector = Some(selector);
     service_spec.ports = config_service
         .as_ref()
         .map(|p| {

@@ -236,7 +236,7 @@ fn test_process_deployment_footprint() -> Result<()> {
 
     let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
     let annotations = BTreeMap::new();
-    let deployment_spec = build_base_deployment_spec(labels, annotations);
+    let deployment_spec = build_base_deployment_spec(labels.clone(), labels, annotations);
 
     let mut by_key = BTreeMap::new();
 
@@ -317,7 +317,7 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
 
     let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
     let annotations = BTreeMap::new();
-    let deployment_spec = build_base_deployment_spec(labels.clone(), annotations);
+    let deployment_spec = build_base_deployment_spec(labels.clone(), labels.clone(), annotations);
 
     // Create a service spec
     let mut service_spec = ServiceSpec::default();
@@ -360,12 +360,13 @@ fn test_build_base_deployment_spec() {
         ("app".to_string(), "test-app".to_string()),
         ("env".to_string(), "prod".to_string()),
     ]);
+    let selector = BTreeMap::from([("app".to_string(), "test-app".to_string())]);
     let annotations = BTreeMap::new();
 
-    let spec = build_base_deployment_spec(labels.clone(), annotations);
+    let spec = build_base_deployment_spec(labels.clone(), selector.clone(), annotations);
 
-    // Verify selector
-    assert_eq!(spec.selector.match_labels, Some(labels.clone()));
+    // Verify the selector is the (smaller) selector set, not the full label set
+    assert_eq!(spec.selector.match_labels, Some(selector));
 
     // Verify defaults
     assert_eq!(spec.progress_deadline_seconds, Some(600));
@@ -426,7 +427,8 @@ fn test_build_pod_spec_empty_volumes() {
 #[test]
 fn test_render_deployment_metadata() -> Result<()> {
     let deployment_name = "my-deployment".to_string();
-    let label_namespace = "myapp.io";
+    let application_labels =
+        BTreeMap::from([("myapp.io/app".to_string(), deployment_name.clone())]);
     let deployment_labels = BTreeMap::from([("custom".to_string(), "label".to_string())]);
     let deployment_annotations =
         BTreeMap::from([("annotation-key".to_string(), "annotation-value".to_string())]);
@@ -434,11 +436,12 @@ fn test_render_deployment_metadata() -> Result<()> {
 
     let metadata = render_deployment_metadata(
         &deployment_name,
-        label_namespace,
+        &application_labels,
         &deployment_labels,
         &deployment_annotations,
         &namespace,
-    )?;
+    )?
+    .metadata;
 
     assert_eq!(metadata.name, Some(deployment_name.clone()));
     assert_eq!(metadata.namespace, namespace);
@@ -447,6 +450,7 @@ fn test_render_deployment_metadata() -> Result<()> {
     assert_eq!(
         labels,
         BTreeMap::from([
+            ("app.kubernetes.io/name".to_string(), deployment_name.clone()),
             ("custom".to_string(), "label".to_string()),
             ("myapp.io/app".to_string(), deployment_name),
         ])
@@ -459,10 +463,79 @@ fn test_render_deployment_metadata() -> Result<()> {
 }
 
 #[test]
+fn test_render_deployment_metadata_defaults_name_label() -> Result<()> {
+    let metadata = render_deployment_metadata(
+        "my-deployment",
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &Some("production".to_string()),
+    )?
+    .metadata;
+
+    assert_eq!(
+        metadata.labels.unwrap(),
+        BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "my-deployment".to_string()
+        )])
+    );
+    Ok(())
+}
+
+#[test]
+fn test_render_deployment_metadata_deployment_labels_win() -> Result<()> {
+    // On a conflicting key the per-instance deployment label beats the config image default.
+    let application_labels = BTreeMap::from([("team".to_string(), "config".to_string())]);
+    let deployment_labels = BTreeMap::from([("team".to_string(), "instance".to_string())]);
+    let metadata = render_deployment_metadata(
+        "my-deployment",
+        &application_labels,
+        &deployment_labels,
+        &BTreeMap::new(),
+        &Some("production".to_string()),
+    )?
+    .metadata;
+
+    assert_eq!(
+        metadata.labels.unwrap().get("team"),
+        Some(&"instance".to_string())
+    );
+    Ok(())
+}
+
+#[test]
+fn test_render_deployment_metadata_reserves_name_label() -> Result<()> {
+    // A `labels` entry for the name label is ignored; it always derives from the resource name.
+    let application_labels =
+        BTreeMap::from([("app.kubernetes.io/name".to_string(), "override".to_string())]);
+    let RenderedMetadata { metadata, selector } = render_deployment_metadata(
+        "my-deployment",
+        &application_labels,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &Some("production".to_string()),
+    )?;
+
+    assert_eq!(
+        metadata.labels.unwrap().get("app.kubernetes.io/name"),
+        Some(&"my-deployment".to_string())
+    );
+    assert_eq!(
+        selector,
+        BTreeMap::from([(
+            "app.kubernetes.io/name".to_string(),
+            "my-deployment".to_string()
+        )])
+    );
+    Ok(())
+}
+
+#[test]
 fn test_render_deployment_metadata_no_namespace() {
     let result = render_deployment_metadata(
         "my-deployment",
-        "myapp.io",
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &BTreeMap::new(),
         &None,
@@ -658,18 +731,19 @@ fn test_deployment_labels_and_annotations_propagate_to_pods() {
         ("prometheus.io/scrape".to_string(), "true".to_string()),
         ("prometheus.io/port".to_string(), "9090".to_string()),
     ]);
+    let selector = BTreeMap::from([("app".to_string(), "my-app".to_string())]);
 
-    let spec = build_base_deployment_spec(labels.clone(), annotations.clone());
+    let spec = build_base_deployment_spec(labels.clone(), selector.clone(), annotations.clone());
 
-    // Verify labels propagate to pod template
+    // Verify the full label set propagates to the pod template
     let template_metadata = spec.template.metadata.expect("Expected template metadata");
-    assert_eq!(template_metadata.labels, Some(labels.clone()));
+    assert_eq!(template_metadata.labels, Some(labels));
 
     // Verify annotations propagate to pod template
     assert_eq!(template_metadata.annotations, Some(annotations));
 
-    // Verify selector also has the labels
-    assert_eq!(spec.selector.match_labels, Some(labels));
+    // Verify the selector is only the selector set, not the descriptive labels
+    assert_eq!(spec.selector.match_labels, Some(selector));
 }
 
 #[test]

@@ -74,6 +74,9 @@ def main(ctx):
                 "dev": Port(name="http", number=8080, protocol="TCP"),  # protocol defaults to TCP
             },
         },
+        labels={
+            "april.dev/color": "pink",
+        },
         resources=Resources(
             requests={
                 "cpu": {
@@ -101,7 +104,13 @@ is like a `StringVariable` but ensures the value of the string is mounted in the
 specified path. `Port` is a special marker that ensures the ports are exposed in the Kubernetes
 deployment object and are available for use by Kubernetes `Service`s.
 
-`ctx` currently only has one method: `ctx.namespace()` provides the namespace of the object.
+Sisyphus sets the `app.kubernetes.io/name` label from the resource's name and uses it as the only
+`Deployment` and `Service` selector. You can't override it. Any other `labels` you pass land on the
+object metadata and the pod template, but never on the selector.
+
+`ctx` has two methods:
+* `ctx.name()` provides the resource's name (taken from the yaml metadata)
+* `ctx.namespace()` provides the resource's namespace
 
 ### Defining a config image
 
@@ -125,6 +134,14 @@ sisyphus_pushable(
 ````
 
 `config_entrypoint` refers to the Starlark configuration defined in the last section.
+
+Starlark configs may `load()` other `.star` files to share code. A path beginning with `//` is
+resolved relative to the root of the config image; any other path is resolved relative to the file
+doing the loading. Any file loaded must be bundled into the image alongside the entrypoint by
+passing it in the `sisyphus_pushable` `config_deps` (or `config_srcs`) attribute.
+
+When running a config locally, `--config` is a path relative to the current directory, and
+`load("//...")` paths resolve against `--config-root` (which defaults to the current directory).
 
 The config and binary images can be built and pushed simultaneously by running
 `bazel run //echo:sisyphus_push`. If you like, you can inspect the binary and config images by
@@ -360,7 +377,7 @@ sisyphus refresh \
       groups work?
 * [ ] Safer namespace deletions: check for untracked resources before deleting
 * [x] Verify cluster-level resources really can't be made inside of namespaced folders
-* [ ] Starlark `load()` statements to allow code reuse
+* [x] Starlark `load()` statements to allow code reuse
 * [ ] Rework the Starlark configuration so we can pass the cluster inside of ctx
 * [x] Resource requests and limits on Sisyphus deployments
 * [x] `SisyphusYaml` objects to include more yaml from the index.yaml file

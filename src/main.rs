@@ -138,10 +138,6 @@ struct PushArgs {
     #[command(flatten)]
     filter: PartialKey,
 
-    // The namespace to label resources with
-    #[arg(long, env = "LABEL_NAMESPACE", default_value = "april.dev")]
-    label_namespace: String,
-
     // The path to the directory of configuration files to monitor
     #[arg(long, env = "MONITOR_DIRECTORY")]
     monitor_directory: String,
@@ -162,12 +158,11 @@ async fn main() -> Result<()> {
             args: PushArgs {
                 database_url,
                 filter,
-                label_namespace,
                 monitor_directory,
             }
         } => {
             let pool = AnyPool::connect(&database_url).await?;
-            diff(&filter, &label_namespace, &monitor_directory, &pool).await?;
+            diff(&filter, &monitor_directory, &pool).await?;
         }
         Commands::Forget { database_url, key } => {
             let pool = AnyPool::connect(&database_url).await?;
@@ -181,12 +176,11 @@ async fn main() -> Result<()> {
             args: PushArgs {
                 database_url,
                 filter,
-                label_namespace,
                 monitor_directory,
             }
         } => {
             let pool = AnyPool::connect(&database_url).await?;
-            push(&filter, &label_namespace, &monitor_directory, &pool).await?
+            push(&filter, &monitor_directory, &pool).await?
         }
         Commands::Refresh { database_url } => {
             let pool = AnyPool::connect(&database_url).await?;
@@ -329,7 +323,6 @@ async fn import(key: KubernetesKey, pool: &AnyPool) -> Result<()> {
 
 async fn diff(
     filter: &PartialKey,
-    label_namespace: &str,
     monitor_directory: &str,
     pool: &AnyPool,
 ) -> Result<Vec<(KubernetesKey, DiffAction)>> {
@@ -343,7 +336,6 @@ async fn diff(
         render_sisyphus_resources(
             &resources.global_by_key,
             /* allow_any_namespace= */ true,
-            label_namespace,
             /* maybe_namespace= */ None,
             &mut from_files.by_key,
             &mut registries,
@@ -361,7 +353,6 @@ async fn diff(
             render_sisyphus_resources(
                 &objects,
                 /* allow_any_namespace= */ false,
-                &label_namespace,
                 Some(namespace.to_string()),
                 &mut from_files.by_key,
                 &mut registries,
@@ -436,11 +427,10 @@ async fn diff(
 
 async fn push(
     filter: &PartialKey,
-    label_namespace: &str,
     monitor_directory: &str,
     pool: &AnyPool,
 ) -> Result<()> {
-    let changed = diff(filter, label_namespace, monitor_directory, pool).await?;
+    let changed = diff(filter, monitor_directory, pool).await?;
     if changed.len() == 0 {
         return Ok(())
     }
@@ -759,7 +749,6 @@ fn insert_sisyphus_resource(
 async fn render_sisyphus_resources(
     objects: &HashMap<SisyphusKey, SisyphusResource>,
     allow_any_namespace: bool,
-    label_namespace: &str,
     maybe_namespace: Option<String>,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
     registries: &mut RegistryClients,
@@ -780,7 +769,6 @@ async fn render_sisyphus_resources(
         render_sisyphus_resource(
             &copy,
             allow_any_namespace,
-            label_namespace,
             &maybe_namespace,
             by_key,
             registries,
