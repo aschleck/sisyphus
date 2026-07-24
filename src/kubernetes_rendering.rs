@@ -472,10 +472,10 @@ fn build_container_config(
 fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<KubeProbe> {
     let mut kube_probe = KubeProbe {
         initial_delay_seconds: probe.initial_delay_seconds,
-        period_seconds: probe.period_seconds,
-        timeout_seconds: probe.timeout_seconds,
-        success_threshold: probe.success_threshold,
-        failure_threshold: probe.failure_threshold,
+        period_seconds: Some(probe.period_seconds.unwrap_or(10)),
+        timeout_seconds: Some(probe.timeout_seconds.unwrap_or(1)),
+        success_threshold: Some(probe.success_threshold.unwrap_or(1)),
+        failure_threshold: Some(probe.failure_threshold.unwrap_or(3)),
         ..Default::default()
     };
     match &probe.action {
@@ -489,6 +489,8 @@ fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<Ku
             kube_probe.http_get = Some(HTTPGetAction {
                 path: Some(path.clone()),
                 port: IntOrString::String(port.clone()),
+                // Set some defaults
+                scheme: Some("HTTP".to_string()),
                 ..Default::default()
             });
         }

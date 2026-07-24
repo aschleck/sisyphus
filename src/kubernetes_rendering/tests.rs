@@ -929,6 +929,27 @@ fn test_build_container_config_renders_probes() -> Result<()> {
 }
 
 #[test]
+fn test_build_container_config_probe_defaults_match_server() -> Result<()> {
+    // The server defaults these fields, so render them to keep pushes from diffing.
+    let app = app_with_metadata_port(Some(probe("/healthz", "metadata")), None);
+    let (container, _, _) =
+        build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new())?;
+
+    let liveness = container.liveness_probe.expect("liveness probe");
+    assert_eq!(liveness.period_seconds, Some(10));
+    assert_eq!(liveness.timeout_seconds, Some(1));
+    assert_eq!(liveness.success_threshold, Some(1));
+    assert_eq!(liveness.failure_threshold, Some(3));
+    // The server omits a zero initial delay, so leave it unset.
+    assert_eq!(liveness.initial_delay_seconds, None);
+    assert_eq!(
+        liveness.http_get.expect("http get").scheme,
+        Some("HTTP".to_string())
+    );
+    Ok(())
+}
+
+#[test]
 fn test_build_container_config_probe_unknown_port_errors() {
     let app = app_with_metadata_port(Some(probe("/healthz", "nope")), None);
     let result = build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new());
@@ -944,9 +965,9 @@ fn test_build_container_config_probe_timing_fields() -> Result<()> {
             port: "metadata".to_string(),
         },
         initial_delay_seconds: Some(5),
-        period_seconds: Some(10),
+        period_seconds: Some(20),
         timeout_seconds: Some(3),
-        success_threshold: Some(1),
+        success_threshold: Some(2),
         failure_threshold: Some(6),
     };
     let app = app_with_metadata_port(Some(liveness), None);
@@ -955,9 +976,9 @@ fn test_build_container_config_probe_timing_fields() -> Result<()> {
 
     let probe = container.liveness_probe.expect("liveness probe");
     assert_eq!(probe.initial_delay_seconds, Some(5));
-    assert_eq!(probe.period_seconds, Some(10));
+    assert_eq!(probe.period_seconds, Some(20));
     assert_eq!(probe.timeout_seconds, Some(3));
-    assert_eq!(probe.success_threshold, Some(1));
+    assert_eq!(probe.success_threshold, Some(2));
     assert_eq!(probe.failure_threshold, Some(6));
     Ok(())
 }
