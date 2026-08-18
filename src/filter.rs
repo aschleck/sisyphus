@@ -2,7 +2,7 @@ use crate::kubernetes_io::KubernetesKey;
 use clap::Args;
 use std::collections::HashSet;
 
-#[derive(Args, Debug)]
+#[derive(Args, Debug, Default)]
 pub(crate) struct PartialKey {
     #[arg(long)]
     api_version: Option<String>,

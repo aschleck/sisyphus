@@ -36,6 +36,9 @@ mod tests;
 
 const NAME_LABEL: &str = "app.kubernetes.io/name";
 
+/// Gives the config image that Sisyphus used to render a Deployment or a CronJob.
+pub(crate) const CONFIG_IMAGE_ANNOTATION: &str = "sisyphus.april.dev/config-image";
+
 pub(crate) async fn render_sisyphus_resource(
     object: &SisyphusResource,
     allow_any_namespace: bool,
@@ -563,6 +566,7 @@ fn process_cronjob_footprint(
         annotations: metadata.annotations.clone(),
         ..Default::default()
     };
+    let cronjob_metadata = with_config_image(metadata, &sisyphus_cronjob.config.image);
     for (cluster, _) in &sisyphus_cronjob.footprint {
         let cronjob_spec = CronJobSpec {
             concurrency_policy: concurrency_policy.clone(),
@@ -581,7 +585,7 @@ fn process_cronjob_footprint(
         };
 
         let serialized = serde_yaml::to_string(&CronJob {
-            metadata: metadata.clone(),
+            metadata: cronjob_metadata.clone(),
             spec: Some(cronjob_spec),
             status: None,
         })?;
@@ -611,12 +615,13 @@ fn process_deployment_footprint(
     namespace: &str,
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
 ) -> Result<()> {
+    let deployment_metadata = with_config_image(metadata, &sisyphus_deployment.config.image);
     for (cluster, cluster_spec) in &sisyphus_deployment.footprint {
         {
             let mut spec = independent_spec.clone();
             spec.replicas = Some(cluster_spec.replicas);
             let serialized = serde_yaml::to_string(&Deployment {
-                metadata: metadata.clone(),
+                metadata: deployment_metadata.clone(),
                 spec: Some(spec),
                 status: None,
             })?;
@@ -661,6 +666,15 @@ fn process_deployment_footprint(
         }
     }
     Ok(())
+}
+
+fn with_config_image(metadata: &ObjectMeta, config_image: &str) -> ObjectMeta {
+    let mut copy = metadata.clone();
+    copy.annotations.get_or_insert_with(BTreeMap::new).insert(
+        CONFIG_IMAGE_ANNOTATION.to_string(),
+        config_image.to_string(),
+    );
+    copy
 }
 
 #[derive(Debug)]

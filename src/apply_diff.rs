@@ -5,19 +5,18 @@ use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::{
-    generate_diff::DiffAction,
+    generate_diff::{DiffAction, ResourceDiff},
     kubernetes_io::{
         get_kubernetes_api, get_kubernetes_clients, KubernetesKey, MANAGER,
     },
+    object_policy::record_push,
+    output::{report_applied, ActionLabels},
 };
 
-pub(crate) async fn apply_diff(
-    changed: Vec<(KubernetesKey, DiffAction)>,
-    pool: &AnyPool,
-) -> Result<()> {
-    let (clients, types) = get_kubernetes_clients(changed.iter().map(|(k, _)| k)).await?;
+pub(crate) async fn apply_diff(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()> {
+    let (clients, types) = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
     // Check that we don't have any namespace vs resource scope mismatches
-    for (key, _) in &changed {
+    for ResourceDiff { key, .. } in &changed {
         let Some((_, caps)) = types.get(&(key.api_version.clone(), key.kind.clone())) else {
             bail!("Unable to find Kubernetes type for key {:?}", key);
         };
@@ -31,10 +30,12 @@ pub(crate) async fn apply_diff(
         }
     }
     let mut pending_deletions: Vec<(kube::Api<DynamicObject>, String)> = Vec::new();
-    for (key, action) in changed {
+    for ResourceDiff { action, key, .. } in changed {
         let api = get_kubernetes_api(&key, &clients, &types)?;
         let is_delete = matches!(action, DiffAction::Delete);
+        let labels = ActionLabels::from(&action);
         apply_single_diff(action, &key, &api, pool).await?;
+        report_applied(&key, labels);
         if is_delete {
             pending_deletions.push((api, key.name.clone()));
         }
@@ -76,7 +77,7 @@ async fn apply_single_diff(
             .bind(serde_yaml::to_string(&result)?)
             .execute(pool)
             .await?;
-            println!("Created {}", key);
+            record_push(key, &result, pool).await?;
         }
         DiffAction::Delete => {
             api.delete(&key.name, &DeleteParams::default())
@@ -100,7 +101,6 @@ async fn apply_single_diff(
             .bind(namespace_or_default(key.namespace.clone()))
             .execute(pool)
             .await?;
-            println!("Deleted {}", key);
         }
         DiffAction::Patch { patch, .. } => {
             let result = api
@@ -131,13 +131,13 @@ async fn apply_single_diff(
             .bind(namespace_or_default(key.namespace.clone()))
             .execute(pool)
             .await?;
-            println!("Updated {}", key);
+            record_push(key, &result, pool).await?;
         }
         DiffAction::Recreate(v) => {
             api.delete(&key.name, &DeleteParams::default())
                 .await
                 .with_context(|| format!("while replacing {}", key))?;
-            println!("Deleting prior to recreate {}", key);
+            eprintln!("Deleting prior to recreate {}", key);
             wait_for_deletion(api, &key.name).await?;
             let result = api
                 .patch(
@@ -167,7 +167,7 @@ async fn apply_single_diff(
             .bind(namespace_or_default(key.namespace.clone()))
             .execute(pool)
             .await?;
-            println!("Recreated {}", key);
+            record_push(key, &result, pool).await?;
         }
     }
     Ok(())
@@ -181,7 +181,7 @@ async fn wait_for_deletion(api: &kube::Api<DynamicObject>, name: &str) -> Result
     let mut i = 0;
     loop {
         if i == 1 {
-            println!("Waiting for {} to be deleted...", name);
+            eprintln!("Waiting for {} to be deleted...", name);
         }
 
         match api.get_opt(name).await? {

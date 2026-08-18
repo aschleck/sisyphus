@@ -69,8 +69,8 @@ fn test_generate_diff_create_object() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Create(_)));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Create(_)));
 
     Ok(())
 }
@@ -105,8 +105,8 @@ fn test_generate_diff_delete_object() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Delete));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Delete));
 
     Ok(())
 }
@@ -150,8 +150,8 @@ fn test_generate_diff_update_object() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Patch { .. }));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Patch { .. }));
 
     Ok(())
 }
@@ -265,7 +265,7 @@ fn test_generate_diff_mixed_operations() -> Result<()> {
     let mut has_delete = false;
     let mut has_update = false;
 
-    for (key, action) in &diff {
+    for ResourceDiff { action, key, .. } in &diff {
         match action {
             DiffAction::Create(_) => {
                 assert_eq!(key, &create_key);
@@ -320,8 +320,8 @@ fn test_generate_diff_namespace_operations() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, ns_key);
-    assert!(matches!(diff[0].1, DiffAction::Create(_)));
+    assert_eq!(diff[0].key, ns_key);
+    assert!(matches!(diff[0].action, DiffAction::Create(_)));
 
     Ok(())
 }
@@ -381,8 +381,8 @@ fn test_deployment_selector_change_triggers_recreate() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Recreate(_)));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Recreate(_)));
 
     Ok(())
 }
@@ -444,8 +444,8 @@ fn test_deployment_non_selector_change_triggers_patch() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Patch { .. }));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Patch { .. }));
 
     Ok(())
 }
@@ -511,8 +511,8 @@ fn test_job_template_change_triggers_recreate() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Recreate(_)));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Recreate(_)));
 
     Ok(())
 }
@@ -584,8 +584,8 @@ fn test_job_non_template_change_triggers_patch() -> Result<()> {
     let diff = generate_diff(have, want)?;
 
     assert_eq!(diff.len(), 1);
-    assert_eq!(diff[0].0, key);
-    assert!(matches!(diff[0].1, DiffAction::Patch { .. }));
+    assert_eq!(diff[0].key, key);
+    assert!(matches!(diff[0].action, DiffAction::Patch { .. }));
 
     Ok(())
 }

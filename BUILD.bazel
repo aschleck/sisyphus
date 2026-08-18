@@ -31,6 +31,8 @@ rust_binary(
 
 rust_test(
     name = "tests",
+    # The object_policy tests read their schema from the migration files.
+    compile_data = glob(["*.sql"]),
     crate = "sisyphus",
 )
 

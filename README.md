@@ -337,8 +337,8 @@ For cluster management commands (`push`, `refresh`, `forget`, `import`), Sisyphu
 PostgreSQL, MySQL, or Sqlite to track the state of deployed resources. The local development
 commands (`app run-config` and `app run-image`) do not require a database.
 
-If you're using PostgreSQL, you can run `20250326020918_initialize.sql` directly. For other
-databases, just run the `CREATE TABLE` statement.
+If you're using PostgreSQL, run the `*.sql` files in order directly. For other databases, run the
+`CREATE TABLE` and `CREATE INDEX` statements from each file.
 
 ### Deploying your configuration
 
@@ -360,6 +360,82 @@ You can also use `refresh` to synchronize the database with the current state of
 sisyphus refresh \
     --database-url 'postgres://user:password@some.server/sisyphus'
 ````
+
+### Pausing an object
+
+A pause makes Sisyphus pushes skip an object. Use a pause when one object is not correct, and you
+must stop the usual pushes for that object only. Sisyphus continues to push the other objects.
+
+To pause an object, give the address of the object and a reason:
+
+````bash
+sisyphus object pause \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --kind Deployment \
+    --namespace echo \
+    --name echo \
+    --reason 'the readiness probe fails'
+````
+
+The address has three parts:
+
+* `--kind` is the kind in your Sisyphus yaml: `Deployment`, `CronJob`, or `KubernetesYaml`. Do not
+  give a Kubernetes kind such as `Ingress`.
+* `--namespace` is the directory that contains the resource. For a resource in the `global`
+  directory, give `global`.
+* `--name` is the name in the `metadata` of the resource.
+
+A pause applies to each Kubernetes object that the resource renders. For example, a pause on a
+`Deployment` also holds its `Service`. A `push` and a `diff` show each paused object with its
+reason, and they make no change to that object.
+
+To let Sisyphus push the object again, use `resume`:
+
+````bash
+sisyphus object resume \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --kind Deployment --namespace echo --name echo
+````
+
+### Rolling one object back
+
+The `object history` command shows each config image that Sisyphus pushed for one object. The most
+recent image is first.
+
+````bash
+sisyphus object history \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --kind Deployment --namespace echo --name echo
+````
+
+You can push a specific config image with `object push`:
+
+````bash
+sisyphus object push \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --monitor-directory './production' \
+    --kind Deployment \
+    --namespace echo \
+    --name echo \
+    --image 'us-docker.pkg.dev/acme/containers/echo_config@sha256:abc...'
+````
+
+The command does not change any pauses.
+
+### Examining objects
+
+The `object status` command shows the image that one object runs and any pauses holding it:
+
+````bash
+sisyphus object status \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --kind Deployment --namespace echo --name echo
+````
+
+If the clusters run different images, each image gets its own line.
+
+Each command that asks for your confirmation accepts `--yes` (`-y`). This flag removes the
+confirmation prompt, and a server can then run the command without a wait for an answer.
 
 # Sharp edges
 

@@ -194,6 +194,90 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
 }
 
 #[test]
+fn test_cronjob_config_image_annotation_stays_off_the_templates() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: CronJobConfig {
+            concurrency_policy: None,
+            env: "prod".to_string(),
+            image: "registry/config@sha256:abc".to_string(),
+            restart_policy: None,
+            schedule: "0 0 * * *".to_string(),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        annotations: Some(BTreeMap::from([(
+            "user".to_string(),
+            "annotation".to_string(),
+        )])),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+
+    let mut by_key = BTreeMap::new();
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        &None,
+        "0 0 * * *",
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    let cronjob_obj = by_key.values().next().unwrap();
+    let annotations = cronjob_obj
+        .metadata
+        .annotations
+        .as_ref()
+        .expect("the CronJob should carry annotations");
+    assert_eq!(
+        annotations.get(CONFIG_IMAGE_ANNOTATION),
+        Some(&"registry/config@sha256:abc".to_string())
+    );
+    assert_eq!(annotations.get("user"), Some(&"annotation".to_string()));
+
+    // The templates must not have this annotation. If they have it, each new render restarts the
+    // pods.
+    let job_template = cronjob_obj
+        .data
+        .get("spec")
+        .and_then(|s| s.get("jobTemplate"))
+        .unwrap();
+    for path in [
+        job_template.get("metadata"),
+        job_template
+            .get("spec")
+            .and_then(|s| s.get("template"))
+            .and_then(|t| t.get("metadata")),
+    ] {
+        let template_annotations = path.and_then(|m| m.get("annotations")).unwrap();
+        assert!(template_annotations.get(CONFIG_IMAGE_ANNOTATION).is_none());
+        assert_eq!(
+            template_annotations.get("user").and_then(|v| v.as_str()),
+            Some("annotation")
+        );
+    }
+
+    Ok(())
+}
+
+#[test]
 fn test_process_deployment_footprint() -> Result<()> {
     use crate::sisyphus_yaml::{
         DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment,
@@ -350,6 +434,110 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
     let service_keys: Vec<_> = by_key.keys().filter(|k| k.kind == "Service").collect();
     assert_eq!(service_keys.len(), 1);
     assert_eq!(service_keys[0].api_version, "v1");
+
+    Ok(())
+}
+
+#[test]
+fn test_deployment_config_image_annotation_stays_off_the_pod_template() -> Result<()> {
+    use crate::sisyphus_yaml::{
+        DeploymentConfig, DeploymentFootprintEntry, DeploymentServiceConfig, Metadata,
+        SisyphusDeployment,
+    };
+
+    let deployment = SisyphusDeployment {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-deployment".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: DeploymentConfig {
+            env: "prod".to_string(),
+            image: "registry/config@sha256:abc".to_string(),
+            service: Some(DeploymentServiceConfig {
+                ports: BTreeMap::new(),
+            }),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([(
+            "cluster1".to_string(),
+            DeploymentFootprintEntry { replicas: 1 },
+        )]),
+    };
+
+    let user_annotations = BTreeMap::from([("user".to_string(), "annotation".to_string())]);
+    let metadata = ObjectMeta {
+        name: Some("test-deployment".to_string()),
+        namespace: Some("default".to_string()),
+        annotations: Some(user_annotations.clone()),
+        ..Default::default()
+    };
+    let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
+    let deployment_spec =
+        build_base_deployment_spec(labels.clone(), labels, user_annotations.clone());
+
+    let service_spec = ServiceSpec {
+        ports: Some(vec![ServicePort {
+            name: Some("http".to_string()),
+            port: 80,
+            ..Default::default()
+        }]),
+        ..Default::default()
+    };
+
+    let mut by_key = BTreeMap::new();
+    process_deployment_footprint(
+        &deployment,
+        &metadata,
+        &deployment_spec,
+        &Some(service_spec),
+        "default",
+        &mut by_key,
+    )?;
+
+    let deployment_key = by_key
+        .keys()
+        .find(|k| k.kind == "Deployment")
+        .unwrap()
+        .clone();
+    let deployment_obj = by_key.get(&deployment_key).unwrap();
+    let annotations = deployment_obj
+        .metadata
+        .annotations
+        .as_ref()
+        .expect("the Deployment should carry annotations");
+    assert_eq!(
+        annotations.get(CONFIG_IMAGE_ANNOTATION),
+        Some(&"registry/config@sha256:abc".to_string())
+    );
+    assert_eq!(annotations.get("user"), Some(&"annotation".to_string()));
+
+    // The pod template must not have this annotation. If it has it, each new render restarts the
+    // pods.
+    let template_annotations = deployment_obj
+        .data
+        .get("spec")
+        .and_then(|s| s.get("template"))
+        .and_then(|t| t.get("metadata"))
+        .and_then(|m| m.get("annotations"))
+        .unwrap();
+    assert!(template_annotations.get(CONFIG_IMAGE_ANNOTATION).is_none());
+    assert_eq!(
+        template_annotations.get("user").and_then(|v| v.as_str()),
+        Some("annotation")
+    );
+
+    // The Service also must not have it. Sisyphus does not render a Service from a config image.
+    let service_key = by_key.keys().find(|k| k.kind == "Service").unwrap().clone();
+    let service_annotations = by_key
+        .get(&service_key)
+        .unwrap()
+        .metadata
+        .annotations
+        .as_ref()
+        .unwrap();
+    assert!(service_annotations.get(CONFIG_IMAGE_ANNOTATION).is_none());
 
     Ok(())
 }

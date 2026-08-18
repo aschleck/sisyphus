@@ -1,8 +1,6 @@
 use crate::kubernetes_io::{KubernetesKey, KubernetesResources};
 use anyhow::{anyhow, bail, Result};
-use console::{style, Style};
 use kube::api::{DynamicObject, TypeMeta};
-use similar::{ChangeTag, TextDiff};
 use std::collections::HashSet;
 
 #[cfg(test)]
@@ -18,10 +16,17 @@ pub(crate) enum DiffAction {
     },
 }
 
+pub(crate) struct ResourceDiff {
+    pub action: DiffAction,
+    pub after: String,
+    pub before: String,
+    pub key: KubernetesKey,
+}
+
 pub(crate) fn generate_diff(
     mut have: KubernetesResources,
     want: KubernetesResources,
-) -> Result<Vec<(KubernetesKey, DiffAction)>> {
+) -> Result<Vec<ResourceDiff>> {
     let mut changed = Vec::new();
     let mut after = HashSet::new();
     for (key, w) in want.namespaces {
@@ -29,7 +34,7 @@ pub(crate) fn generate_diff(
         if h.as_ref() == Some(&w) {
             continue;
         }
-        changed.push((key.clone(), generate_single_diff(&key, h, Some(w))?));
+        changed.push(generate_single_diff(&key, h, Some(w))?);
         after.insert(key);
     }
 
@@ -38,36 +43,36 @@ pub(crate) fn generate_diff(
         if h.as_ref() == Some(&w) {
             continue;
         }
-        changed.push((key.clone(), generate_single_diff(&key, h, Some(w))?));
+        changed.push(generate_single_diff(&key, h, Some(w))?);
         after.insert(key);
     }
 
     for (key, h) in have.by_key {
         if !after.contains(&key) {
-            changed.push((key.clone(), generate_single_diff(&key, Some(h), None)?));
+            changed.push(generate_single_diff(&key, Some(h), None)?);
         }
     }
 
     for (key, h) in have.namespaces {
         if !after.contains(&key) {
-            changed.push((key.clone(), generate_single_diff(&key, Some(h), None)?));
+            changed.push(generate_single_diff(&key, Some(h), None)?);
         }
     }
 
     Ok(changed)
 }
 
-fn generate_single_diff<'a>(
+fn generate_single_diff(
     key: &KubernetesKey,
     have: Option<DynamicObject>,
     want: Option<DynamicObject>,
-) -> Result<DiffAction> {
-    let hs = if let Some(h) = &have {
+) -> Result<ResourceDiff> {
+    let before = if let Some(h) = &have {
         serde_yaml::to_string(&h)?
     } else {
         "".to_string()
     };
-    let ws = if let Some(w) = &want {
+    let after = if let Some(w) = &want {
         serde_yaml::to_string(&w)?
     } else {
         "".to_string()
@@ -89,18 +94,12 @@ fn generate_single_diff<'a>(
         (None, None) => bail!("Expected a difference"),
     };
 
-    let verb = match &action {
-        DiffAction::Create(_) => style("create").green(),
-        DiffAction::Delete => style("delete").red(),
-        DiffAction::Patch { .. } => style("patch").yellow(),
-        DiffAction::Recreate(_) => style("delete and recreate").red(),
-    };
-
-    let diff = TextDiff::from_lines(&hs, &ws);
-    println!("• {} {}\n", verb, key);
-    print_diff(&diff);
-    println!("");
-    Ok(action)
+    Ok(ResourceDiff {
+        action,
+        after,
+        before,
+        key: key.clone(),
+    })
 }
 
 fn requires_recreate(types: &TypeMeta, patch: &json_patch::Patch) -> bool {
@@ -168,15 +167,4 @@ fn requires_recreate(types: &TypeMeta, patch: &json_patch::Patch) -> bool {
         _ => {},
     };
     false
-}
-
-pub(crate) fn print_diff<'a>(diff: &TextDiff<'a, 'a, 'a, str>) -> () {
-    for change in diff.iter_all_changes() {
-        let (sign, style) = match change.tag() {
-            ChangeTag::Delete => ("-", Style::new().red()),
-            ChangeTag::Insert => ("+", Style::new().green()),
-            ChangeTag::Equal => (" ", Style::new()),
-        };
-        print!("{}{}", style.apply_to(sign).bold(), style.apply_to(change));
-    }
 }
