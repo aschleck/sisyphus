@@ -88,7 +88,8 @@ pub(crate) async fn render_sisyphus_resource(
             )?;
 
             let restart_policy = v.config.restart_policy.as_deref().unwrap_or("OnFailure");
-            let pod_spec = build_pod_spec(container, restart_policy, volumes);
+            let pod_spec =
+                build_pod_spec(container, restart_policy, &v.config.service_account, volumes);
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -134,7 +135,12 @@ pub(crate) async fn render_sisyphus_resource(
                 &v.config.variables,
             )?;
 
-            independent_spec.template.spec = Some(build_pod_spec(container, "Always", volumes));
+            independent_spec.template.spec = Some(build_pod_spec(
+                container,
+                "Always",
+                &v.config.service_account,
+                volumes,
+            ));
 
             let service_spec_option = build_service_spec(&v.config.service, &ports, selector)?;
 
@@ -501,12 +507,19 @@ fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<Ku
     Ok(kube_probe)
 }
 
-fn build_pod_spec(container: Container, restart_policy: &str, volumes: Vec<Volume>) -> PodSpec {
+fn build_pod_spec(
+    container: Container,
+    restart_policy: &str,
+    service_account: &Option<String>,
+    volumes: Vec<Volume>,
+) -> PodSpec {
     let mut pod_spec = PodSpec::default();
     pod_spec.containers.push(container);
     if volumes.len() > 0 {
         pod_spec.volumes = Some(volumes);
     }
+    // An app that names no service account gets the default one of its namespace.
+    pod_spec.service_account_name = service_account.clone();
     // Set some defaults
     pod_spec.dns_policy = Some("ClusterFirst".to_string());
     pod_spec.restart_policy = Some(restart_policy.to_string());

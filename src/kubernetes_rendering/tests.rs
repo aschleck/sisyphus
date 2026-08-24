@@ -19,6 +19,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
             image: "test-image".to_string(),
             restart_policy: None,
             schedule: "0 0 * * *".to_string(),
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([
@@ -41,7 +42,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -88,6 +89,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
             image: "test-image".to_string(),
             restart_policy: None,
             schedule: "*/5 * * * *".to_string(),
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
@@ -103,7 +105,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -156,6 +158,7 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
             image: "test-image".to_string(),
             restart_policy: None,
             schedule: "0 * * * *".to_string(),
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
@@ -171,7 +174,7 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -210,6 +213,7 @@ fn test_cronjob_config_image_annotation_stays_off_the_templates() -> Result<()> 
             image: "registry/config@sha256:abc".to_string(),
             restart_policy: None,
             schedule: "0 0 * * *".to_string(),
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
@@ -227,7 +231,7 @@ fn test_cronjob_config_image_annotation_stays_off_the_templates() -> Result<()> 
 
     let mut container = Container::default();
     container.name = "test-cronjob".to_string();
-    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
     process_cronjob_footprint(
@@ -294,6 +298,7 @@ fn test_process_deployment_footprint() -> Result<()> {
             env: "prod".to_string(),
             image: "test-image".to_string(),
             service: None,
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([
@@ -385,6 +390,7 @@ fn test_process_deployment_footprint_with_service() -> Result<()> {
             env: "prod".to_string(),
             image: "test-image".to_string(),
             service: None,
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([(
@@ -455,6 +461,7 @@ fn test_deployment_config_image_annotation_stays_off_the_pod_template() -> Resul
         config: DeploymentConfig {
             env: "prod".to_string(),
             image: "registry/config@sha256:abc".to_string(),
+            service_account: None,
             service: Some(DeploymentServiceConfig {
                 ports: BTreeMap::new(),
             }),
@@ -583,7 +590,7 @@ fn test_build_pod_spec() {
     volume.name = "test-volume".to_string();
     let volumes = vec![volume.clone()];
 
-    let pod_spec = build_pod_spec(container.clone(), "Always", volumes.clone());
+    let pod_spec = build_pod_spec(container.clone(), "Always", &None, volumes.clone());
 
     // Verify container
     assert_eq!(pod_spec.containers.len(), 1);
@@ -608,7 +615,7 @@ fn test_build_pod_spec_empty_volumes() {
     let mut container = Container::default();
     container.name = "test-container".to_string();
 
-    let pod_spec = build_pod_spec(container, "Always", Vec::new());
+    let pod_spec = build_pod_spec(container, "Always", &None, Vec::new());
     assert_eq!(pod_spec.volumes, None);
 }
 
@@ -968,6 +975,7 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
             image: "test-image".to_string(),
             restart_policy: None,
             schedule: "0 0 * * *".to_string(),
+            service_account: None,
             variables: BTreeMap::new(),
         },
         footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
@@ -985,7 +993,7 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -1039,20 +1047,206 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
 }
 
 #[test]
+fn test_cronjob_config_reads_a_service_account() {
+    use crate::sisyphus_yaml::CronJobConfig;
+
+    let config: CronJobConfig = serde_yaml::from_str(
+        "concurrencyPolicy: Forbid\n\
+         env: prod\n\
+         image: example/image:latest\n\
+         schedule: \"0 0 * * *\"\n\
+         serviceAccount: data-puller\n",
+    )
+    .unwrap();
+    assert_eq!(config.service_account, Some("data-puller".to_string()));
+
+    let without: CronJobConfig = serde_yaml::from_str(
+        "env: prod\nimage: example/image:latest\nschedule: \"0 0 * * *\"\n",
+    )
+    .unwrap();
+    assert_eq!(without.service_account, None);
+}
+
+#[test]
+fn test_deployment_config_reads_a_service_account() {
+    use crate::sisyphus_yaml::DeploymentConfig;
+
+    let config: DeploymentConfig = serde_yaml::from_str(
+        "env: prod\n\
+         image: example/image:latest\n\
+         serviceAccount: data-puller\n",
+    )
+    .unwrap();
+    assert_eq!(config.service_account, Some("data-puller".to_string()));
+
+    let without: DeploymentConfig =
+        serde_yaml::from_str("env: prod\nimage: example/image:latest\n").unwrap();
+    assert_eq!(without.service_account, None);
+}
+
+/// The service account must reach the rendered object, and not the pod spec only. The rendering
+/// goes through yaml and into a `DynamicObject`, and a field that k8s-openapi does not serialize
+/// is lost there without an error.
+#[test]
+fn test_process_cronjob_footprint_keeps_the_service_account() -> Result<()> {
+    use crate::sisyphus_yaml::{CronJobConfig, CronJobFootprintEntry, Metadata, SisyphusCronJob};
+
+    let cronjob = SisyphusCronJob {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-cronjob".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: CronJobConfig {
+            concurrency_policy: None,
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            restart_policy: None,
+            schedule: "0 0 * * *".to_string(),
+            service_account: Some("data-puller".to_string()),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([("cluster1".to_string(), CronJobFootprintEntry {})]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-cronjob".to_string()),
+        namespace: Some("default".to_string()),
+        ..Default::default()
+    };
+
+    let mut container = Container::default();
+    container.name = "test-cronjob".to_string();
+    let pod_spec = build_pod_spec(
+        container,
+        "OnFailure",
+        &cronjob.config.service_account,
+        Vec::new(),
+    );
+
+    let mut by_key = BTreeMap::new();
+    process_cronjob_footprint(
+        &cronjob,
+        &metadata,
+        &None,
+        &cronjob.config.schedule,
+        &pod_spec,
+        "default",
+        &mut by_key,
+    )?;
+
+    let object = by_key.values().next().unwrap();
+    let service_account = object
+        .data
+        .get("spec")
+        .and_then(|s| s.get("jobTemplate"))
+        .and_then(|t| t.get("spec"))
+        .and_then(|s| s.get("template"))
+        .and_then(|t| t.get("spec"))
+        .and_then(|s| s.get("serviceAccountName"))
+        .and_then(|n| n.as_str());
+    assert_eq!(service_account, Some("data-puller"));
+
+    Ok(())
+}
+
+/// The same for a Deployment, whose pod spec sits one level down from the Deployment spec.
+#[test]
+fn test_process_deployment_footprint_keeps_the_service_account() -> Result<()> {
+    use crate::sisyphus_yaml::{
+        DeploymentConfig, DeploymentFootprintEntry, Metadata, SisyphusDeployment,
+    };
+
+    let deployment = SisyphusDeployment {
+        api_version: "sisyphus/v1".to_string(),
+        metadata: Metadata {
+            name: "test-deployment".to_string(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+        },
+        config: DeploymentConfig {
+            env: "prod".to_string(),
+            image: "test-image".to_string(),
+            service: None,
+            service_account: Some("data-puller".to_string()),
+            variables: BTreeMap::new(),
+        },
+        footprint: BTreeMap::from([(
+            "cluster1".to_string(),
+            DeploymentFootprintEntry { replicas: 1 },
+        )]),
+    };
+
+    let metadata = ObjectMeta {
+        name: Some("test-deployment".to_string()),
+        namespace: Some("default".to_string()),
+        ..Default::default()
+    };
+
+    let labels = BTreeMap::from([("app".to_string(), "test-deployment".to_string())]);
+    let mut deployment_spec = build_base_deployment_spec(labels.clone(), labels, BTreeMap::new());
+
+    let mut container = Container::default();
+    container.name = "test-deployment".to_string();
+    deployment_spec.template.spec = Some(build_pod_spec(
+        container,
+        "Always",
+        &deployment.config.service_account,
+        Vec::new(),
+    ));
+
+    let mut by_key = BTreeMap::new();
+    process_deployment_footprint(
+        &deployment,
+        &metadata,
+        &deployment_spec,
+        &None,
+        "default",
+        &mut by_key,
+    )?;
+
+    let object = by_key.values().next().unwrap();
+    let service_account = object
+        .data
+        .get("spec")
+        .and_then(|s| s.get("template"))
+        .and_then(|t| t.get("spec"))
+        .and_then(|s| s.get("serviceAccountName"))
+        .and_then(|n| n.as_str());
+    assert_eq!(service_account, Some("data-puller"));
+
+    Ok(())
+}
+
+#[test]
+fn test_build_pod_spec_service_account() {
+    let mut container = Container::default();
+    container.name = "test-container".to_string();
+
+    let pod_spec = build_pod_spec(container.clone(), "OnFailure", &None, Vec::new());
+    assert_eq!(pod_spec.service_account_name, None);
+
+    let named = Some("data-puller".to_string());
+    let pod_spec = build_pod_spec(container, "OnFailure", &named, Vec::new());
+    assert_eq!(pod_spec.service_account_name, named);
+}
+
+#[test]
 fn test_build_pod_spec_restart_policy() {
     let mut container = Container::default();
     container.name = "test-container".to_string();
 
     // Test with OnFailure (typical for Jobs/CronJobs)
-    let pod_spec = build_pod_spec(container.clone(), "OnFailure", Vec::new());
+    let pod_spec = build_pod_spec(container.clone(), "OnFailure", &None, Vec::new());
     assert_eq!(pod_spec.restart_policy, Some("OnFailure".to_string()));
 
     // Test with Never (also valid for Jobs/CronJobs)
-    let pod_spec = build_pod_spec(container.clone(), "Never", Vec::new());
+    let pod_spec = build_pod_spec(container.clone(), "Never", &None, Vec::new());
     assert_eq!(pod_spec.restart_policy, Some("Never".to_string()));
 
     // Test with Always (typical for Deployments)
-    let pod_spec = build_pod_spec(container, "Always", Vec::new());
+    let pod_spec = build_pod_spec(container, "Always", &None, Vec::new());
     assert_eq!(pod_spec.restart_policy, Some("Always".to_string()));
 }
 

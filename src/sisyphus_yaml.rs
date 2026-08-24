@@ -123,6 +123,7 @@ pub struct CronJobConfig {
     pub image: String,
     pub restart_policy: Option<String>,
     pub schedule: String,
+    pub service_account: Option<String>,
     #[serde(default)]
     pub variables: BTreeMap<String, VariableSource>,
 }
@@ -137,6 +138,7 @@ pub struct DeploymentConfig {
     pub env: String,
     pub image: String,
     pub service: Option<DeploymentServiceConfig>,
+    pub service_account: Option<String>,
     #[serde(default)]
     pub variables: BTreeMap<String, VariableSource>,
 }

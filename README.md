@@ -221,6 +221,9 @@ footprint:
   gke_acme_us-west4_ap-us-west4: {}
 ````
 
+Both objects accept an optional `serviceAccount` in `config`. An app that names no service account
+runs as `default`.
+
 ### Deploying with `KubernetesYaml`
 
 ````yaml
