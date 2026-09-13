@@ -309,7 +309,7 @@ async fn test_a_global_resource_uses_the_default_namespace() -> Result<()> {
 
 const MIGRATIONS: [&str; 2] = [
     include_str!("../../20250326020918_initialize.sql"),
-    include_str!("../../20260812000000_objects.sql"),
+    include_str!("../../20260812000000_history_and_pause.sql"),
 ];
 
 async fn memory_pool() -> Result<AnyPool> {
