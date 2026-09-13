@@ -645,7 +645,10 @@ fn test_render_deployment_metadata() -> Result<()> {
     assert_eq!(
         labels,
         BTreeMap::from([
-            ("app.kubernetes.io/name".to_string(), deployment_name.clone()),
+            (
+                "app.kubernetes.io/name".to_string(),
+                deployment_name.clone()
+            ),
             ("custom".to_string(), "label".to_string()),
             ("myapp.io/app".to_string(), deployment_name),
         ])
@@ -925,6 +928,374 @@ fn test_render_argument_varying_not_found() -> Result<()> {
 }
 
 #[test]
+fn test_render_argument_string_variable_from_config_map() -> Result<()> {
+    use crate::config_image::StringVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let arg = ArgumentValues::Uniform(Argument::StringVariable(StringVariable {
+        name: "root-ca".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "root-ca".to_string(),
+        VariableSource::ConfigMapKeyRef(KubernetesKeyRef {
+            key: "ca.crt".to_string(),
+            name: "escalante-root-ca".to_string(),
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    let result = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut ports,
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )?;
+
+    let Some(RenderedArgument::ValueFrom(source)) = result else {
+        panic!("Expected ValueFrom variant");
+    };
+    let selector = source
+        .config_map_key_ref
+        .expect("Expected a config map ref");
+    assert_eq!(selector.name, "escalante-root-ca");
+    assert_eq!(selector.key, "ca.crt");
+    assert!(source.secret_key_ref.is_none());
+    assert!(volumes.is_empty());
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_file_variable_from_config_map() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+        name: "root-ca".to_string(),
+        path: "/etc/tls/ca.crt".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "root-ca".to_string(),
+        VariableSource::ConfigMapKeyRef(KubernetesKeyRef {
+            key: "ca.crt".to_string(),
+            name: "escalante-root-ca".to_string(),
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    let result = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut ports,
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )?;
+
+    let Some(RenderedArgument::String(path)) = result else {
+        panic!("Expected String variant");
+    };
+    assert_eq!(path, "/etc/tls/ca.crt");
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].name, "root-ca");
+    assert_eq!(default_mode(&volumes[0]), Some(420));
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].secret.is_none());
+    let config_map = sources[0]
+        .config_map
+        .as_ref()
+        .expect("Expected a config map source");
+    assert_eq!(config_map.name, "escalante-root-ca");
+    assert_eq!(
+        config_map.items.as_ref().expect("Expected items"),
+        &vec![KeyToPath {
+            key: "ca.crt".to_string(),
+            mode: None,
+            path: "ca.crt".to_string(),
+        }]
+    );
+
+    assert_eq!(volume_mounts.len(), 1);
+    assert_eq!(volume_mounts[0].name, "root-ca");
+    assert_eq!(volume_mounts[0].mount_path, "/etc/tls");
+    assert_eq!(volume_mounts[0].read_only, Some(true));
+    Ok(())
+}
+
+/// Two keys from one config map belong in one volume, the way two keys from one secret do.
+#[test]
+fn test_render_argument_file_variables_share_a_config_map_volume() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let variables = BTreeMap::from([
+        (
+            "root-ca".to_string(),
+            VariableSource::ConfigMapKeyRef(KubernetesKeyRef {
+                key: "ca.crt".to_string(),
+                name: "escalante-root-ca".to_string(),
+            }),
+        ),
+        (
+            "intermediate-ca".to_string(),
+            VariableSource::ConfigMapKeyRef(KubernetesKeyRef {
+                key: "intermediate.crt".to_string(),
+                name: "escalante-root-ca".to_string(),
+            }),
+        ),
+    ]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    for (name, path) in [
+        ("root-ca", "/etc/tls/ca.crt"),
+        ("intermediate-ca", "/etc/tls/intermediate.crt"),
+    ] {
+        let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+            name: name.to_string(),
+            path: path.to_string(),
+        }));
+        render_argument(
+            &arg,
+            "prod",
+            &BTreeMap::new(),
+            &mut ports,
+            &variables,
+            &mut volumes,
+            &mut volume_mounts,
+        )?;
+    }
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volume_mounts.len(), 1);
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1, "one config map is one source");
+    let config_map = sources[0]
+        .config_map
+        .as_ref()
+        .expect("Expected a config map source");
+    let items = config_map.items.as_ref().expect("Expected items");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].key, "ca.crt");
+    assert_eq!(items[1].key, "intermediate.crt");
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_file_variable_from_secret() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+        name: "tls".to_string(),
+        path: "/etc/tls/tls.key".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "tls".to_string(),
+        VariableSource::SecretKeyRef(KubernetesKeyRef {
+            key: "tls.key".to_string(),
+            name: "sourcerer-tls".to_string(),
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    let result = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut ports,
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )?;
+
+    let Some(RenderedArgument::String(path)) = result else {
+        panic!("Expected String variant");
+    };
+    assert_eq!(path, "/etc/tls/tls.key");
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].name, "tls");
+    assert_eq!(default_mode(&volumes[0]), Some(420));
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].config_map.is_none());
+    let secret = sources[0]
+        .secret
+        .as_ref()
+        .expect("Expected a secret source");
+    assert_eq!(secret.name, "sourcerer-tls");
+    assert_eq!(
+        secret.items.as_ref().expect("Expected items"),
+        &vec![KeyToPath {
+            key: "tls.key".to_string(),
+            mode: None,
+            path: "tls.key".to_string(),
+        }]
+    );
+
+    assert_eq!(volume_mounts.len(), 1);
+    assert_eq!(volume_mounts[0].name, "tls");
+    assert_eq!(volume_mounts[0].mount_path, "/etc/tls");
+    assert_eq!(volume_mounts[0].read_only, Some(true));
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_file_variables_share_a_secret_volume() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let variables = BTreeMap::from([
+        (
+            "tls-cert".to_string(),
+            VariableSource::SecretKeyRef(KubernetesKeyRef {
+                key: "tls.crt".to_string(),
+                name: "sourcerer-tls".to_string(),
+            }),
+        ),
+        (
+            "tls-key".to_string(),
+            VariableSource::SecretKeyRef(KubernetesKeyRef {
+                key: "tls.key".to_string(),
+                name: "sourcerer-tls".to_string(),
+            }),
+        ),
+    ]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    for (name, path) in [
+        ("tls-cert", "/etc/tls/tls.crt"),
+        ("tls-key", "/etc/tls/tls.key"),
+    ] {
+        let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+            name: name.to_string(),
+            path: path.to_string(),
+        }));
+        render_argument(
+            &arg,
+            "prod",
+            &BTreeMap::new(),
+            &mut ports,
+            &variables,
+            &mut volumes,
+            &mut volume_mounts,
+        )?;
+    }
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volume_mounts.len(), 1);
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1, "one secret is one source");
+    let secret = sources[0]
+        .secret
+        .as_ref()
+        .expect("Expected a secret source");
+    let items = secret.items.as_ref().expect("Expected items");
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0].key, "tls.crt");
+    assert_eq!(items[1].key, "tls.key");
+    Ok(())
+}
+
+/// A config map and a secret that hold files of one directory share one projected volume. Two
+/// volumes at one mount path would be two volume mounts at one path, and Kubernetes rejects a
+/// container that mounts two volumes at the same path.
+#[test]
+fn test_render_argument_file_variables_mix_sources_at_one_path() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::KubernetesKeyRef;
+
+    let variables = BTreeMap::from([
+        (
+            "root-ca".to_string(),
+            VariableSource::ConfigMapKeyRef(KubernetesKeyRef {
+                key: "ca.crt".to_string(),
+                name: "escalante-root-ca".to_string(),
+            }),
+        ),
+        (
+            "tls-key".to_string(),
+            VariableSource::SecretKeyRef(KubernetesKeyRef {
+                key: "tls.key".to_string(),
+                name: "sourcerer-tls".to_string(),
+            }),
+        ),
+    ]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    for (name, path) in [
+        ("root-ca", "/etc/tls/ca.crt"),
+        ("tls-key", "/etc/tls/tls.key"),
+    ] {
+        let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+            name: name.to_string(),
+            path: path.to_string(),
+        }));
+        render_argument(
+            &arg,
+            "prod",
+            &BTreeMap::new(),
+            &mut ports,
+            &variables,
+            &mut volumes,
+            &mut volume_mounts,
+        )?;
+    }
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volume_mounts.len(), 1);
+    assert_eq!(volume_mounts[0].mount_path, "/etc/tls");
+
+    // One source for the config map and one for the secret, each with the file it holds.
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 2);
+    let config_map = sources[0]
+        .config_map
+        .as_ref()
+        .expect("Expected a config map source");
+    assert_eq!(config_map.name, "escalante-root-ca");
+    assert_eq!(
+        config_map.items.as_ref().expect("Expected items"),
+        &vec![KeyToPath {
+            key: "ca.crt".to_string(),
+            mode: None,
+            path: "ca.crt".to_string(),
+        }]
+    );
+    let secret = sources[1]
+        .secret
+        .as_ref()
+        .expect("Expected a secret source");
+    assert_eq!(secret.name, "sourcerer-tls");
+    assert_eq!(
+        secret.items.as_ref().expect("Expected items"),
+        &vec![KeyToPath {
+            key: "tls.key".to_string(),
+            mode: None,
+            path: "tls.key".to_string(),
+        }]
+    );
+    Ok(())
+}
+
+#[test]
 fn test_deployment_labels_and_annotations_propagate_to_pods() {
     let labels = BTreeMap::from([
         ("app".to_string(), "my-app".to_string()),
@@ -1014,11 +1385,21 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     // Verify labels and annotations on job template metadata
     let job_metadata = job_template.get("metadata").unwrap();
     let job_labels = job_metadata.get("labels").unwrap();
-    assert_eq!(job_labels.get("app").unwrap().as_str().unwrap(), "my-cronjob");
-    assert_eq!(job_labels.get("team").unwrap().as_str().unwrap(), "platform");
+    assert_eq!(
+        job_labels.get("app").unwrap().as_str().unwrap(),
+        "my-cronjob"
+    );
+    assert_eq!(
+        job_labels.get("team").unwrap().as_str().unwrap(),
+        "platform"
+    );
     let job_annotations = job_metadata.get("annotations").unwrap();
     assert_eq!(
-        job_annotations.get("description").unwrap().as_str().unwrap(),
+        job_annotations
+            .get("description")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "Nightly cleanup job"
     );
     assert_eq!(
@@ -1031,11 +1412,21 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     let pod_template = job_spec.get("template").unwrap();
     let pod_metadata = pod_template.get("metadata").unwrap();
     let pod_labels = pod_metadata.get("labels").unwrap();
-    assert_eq!(pod_labels.get("app").unwrap().as_str().unwrap(), "my-cronjob");
-    assert_eq!(pod_labels.get("team").unwrap().as_str().unwrap(), "platform");
+    assert_eq!(
+        pod_labels.get("app").unwrap().as_str().unwrap(),
+        "my-cronjob"
+    );
+    assert_eq!(
+        pod_labels.get("team").unwrap().as_str().unwrap(),
+        "platform"
+    );
     let pod_annotations = pod_metadata.get("annotations").unwrap();
     assert_eq!(
-        pod_annotations.get("description").unwrap().as_str().unwrap(),
+        pod_annotations
+            .get("description")
+            .unwrap()
+            .as_str()
+            .unwrap(),
         "Nightly cleanup job"
     );
     assert_eq!(
@@ -1060,10 +1451,9 @@ fn test_cronjob_config_reads_a_service_account() {
     .unwrap();
     assert_eq!(config.service_account, Some("data-puller".to_string()));
 
-    let without: CronJobConfig = serde_yaml::from_str(
-        "env: prod\nimage: example/image:latest\nschedule: \"0 0 * * *\"\n",
-    )
-    .unwrap();
+    let without: CronJobConfig =
+        serde_yaml::from_str("env: prod\nimage: example/image:latest\nschedule: \"0 0 * * *\"\n")
+            .unwrap();
     assert_eq!(without.service_account, None);
 }
 
@@ -1363,4 +1753,23 @@ fn test_build_container_config_probe_timing_fields() -> Result<()> {
     assert_eq!(probe.success_threshold, Some(2));
     assert_eq!(probe.failure_threshold, Some(6));
     Ok(())
+}
+
+/// The sources of a projected volume. Each file variable renders into one of these.
+fn projected_sources(volume: &Volume) -> &Vec<VolumeProjection> {
+    volume
+        .projected
+        .as_ref()
+        .expect("Expected a projected volume")
+        .sources
+        .as_ref()
+        .expect("Expected the volume to hold sources")
+}
+
+fn default_mode(volume: &Volume) -> Option<i32> {
+    volume
+        .projected
+        .as_ref()
+        .expect("Expected a projected volume")
+        .default_mode
 }

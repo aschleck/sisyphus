@@ -15,10 +15,11 @@ use k8s_openapi::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
-            Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, KeyToPath,
-            PodSecurityContext, PodSpec, PodTemplateSpec, Probe as KubeProbe, ResourceRequirements,
-            SecretKeySelector, SecretVolumeSource, Service, ServicePort, ServiceSpec, Volume,
-            VolumeMount,
+            ConfigMapKeySelector, ConfigMapProjection, Container, ContainerPort, EnvVar,
+            EnvVarSource, HTTPGetAction, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
+            Probe as KubeProbe, ProjectedVolumeSource, ResourceRequirements, SecretKeySelector,
+            SecretProjection, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
+            VolumeProjection,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -88,8 +89,12 @@ pub(crate) async fn render_sisyphus_resource(
             )?;
 
             let restart_policy = v.config.restart_policy.as_deref().unwrap_or("OnFailure");
-            let pod_spec =
-                build_pod_spec(container, restart_policy, &v.config.service_account, volumes);
+            let pod_spec = build_pod_spec(
+                container,
+                restart_policy,
+                &v.config.service_account,
+                volumes,
+            );
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -737,6 +742,13 @@ fn render_argument(
                 .get(&v.name)
                 .ok_or_else(|| anyhow!("Variable {} isn't set", v.name))?;
             match variable {
+                VariableSource::ConfigMapKeyRef(v) => {
+                    source.config_map_key_ref = Some(ConfigMapKeySelector {
+                        name: v.name.clone(),
+                        key: v.key.clone(),
+                        optional: None,
+                    });
+                }
                 VariableSource::SecretKeyRef(v) => {
                     source.secret_key_ref = Some(SecretKeySelector {
                         name: v.name.clone(),
@@ -757,87 +769,127 @@ fn render_file_variable(
     volume_mounts: &mut Vec<VolumeMount>,
 ) -> Result<RenderedArgument> {
     let path = Path::new(&variable.path);
-    let filename = path
-        .file_name()
-        .ok_or_else(|| anyhow!("Unable to get file name"))?
-        .to_string_lossy();
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow!("Variable path has no parent"))?
-        .to_string_lossy();
+    let filename = String::from(
+        path.file_name()
+            .ok_or_else(|| anyhow!("Unable to get file name"))?
+            .to_string_lossy(),
+    );
+    let parent = String::from(
+        path.parent()
+            .ok_or_else(|| anyhow!("Variable path has no parent"))?
+            .to_string_lossy(),
+    );
 
-    let volume = match source {
-        VariableSource::SecretKeyRef(secret_source) => {
-            let existing_volume = volumes.iter_mut().find(|volume| {
-                volume
-                    .secret
-                    .as_ref()
-                    .map(|secret| secret.secret_name.as_ref() == Some(&secret_source.name))
-                    .unwrap_or(false)
+    // One volume for each directory that the config reads files from. A container cannot mount two
+    // volumes at one path, so a config map and a secret that both hold files of one directory must
+    // share a volume, and a projected volume is the one kind that carries both.
+    let volume_name = match volume_mounts.iter().find(|m| m.mount_path == parent) {
+        Some(mount) => mount.name.clone(),
+        None => {
+            let mut mount = VolumeMount::default();
+            mount.mount_path = parent;
+            mount.name = variable.name.clone();
+            mount.read_only = Some(true);
+            volume_mounts.push(mount);
+
+            let mut volume = Volume::default();
+            volume.name = variable.name.clone();
+            volume.projected = Some(ProjectedVolumeSource {
+                // TODO(april): the following 420 is the default from Kubernetes but it's
+                // confusing. Why does the group have write? We set read_only on the mount, what
+                // does this even mean?
+                default_mode: Some(420),
+                sources: Some(Vec::new()),
             });
-            match existing_volume {
-                Some(v) => v,
-                None => {
-                    let mut volume = Volume::default();
-                    volume.name = variable.name.clone();
-                    let mut secret = SecretVolumeSource::default();
-                    // TODO(april): the following 420 is the default from Kubernetes but it's
-                    // confusing. Why does the group have write? We set read_only below, what does
-                    // this even mean?
-                    secret.default_mode = Some(420);
-                    secret.secret_name = Some(secret_source.name.clone());
-                    secret.items = Some(Vec::new());
-                    volume.secret = Some(secret);
-                    volumes.push(volume);
-                    volumes.last_mut().unwrap()
-                }
-            }
+            volumes.push(volume);
+            variable.name.clone()
         }
     };
 
-    match source {
-        VariableSource::SecretKeyRef(_) => {
-            let existing_mount = volume_mounts
-                .iter()
-                .find(|mount| mount.name == volume.name && mount.mount_path == parent);
-            match existing_mount {
-                Some(m) => m,
-                None => {
-                    // TODO(april): can we mount the same volume multiple times?
-                    let mut mount = VolumeMount::default();
-                    mount.name = volume.name.clone();
-                    mount.read_only = Some(true);
-                    mount.mount_path = String::from(parent);
-                    volume_mounts.push(mount);
-                    volume_mounts.last().unwrap()
-                }
-            }
-        }
-    };
-
-    match source {
-        VariableSource::SecretKeyRef(secret_source) => {
-            let Some(secret) = volume.secret.as_mut() else {
-                unreachable!("Expected secret");
-            };
-            let Some(items) = secret.items.as_mut() else {
-                unreachable!("Expected items");
-            };
-            let existing_item = items
-                .iter()
-                .find(|i| secret_source.key == i.key && filename == i.path);
-            match existing_item {
-                Some(_) => (),
-                None => {
-                    items.push(KeyToPath {
-                        key: secret_source.key.clone(),
-                        mode: None,
-                        path: String::from(filename),
-                    });
-                }
-            }
-        }
-    };
+    let sources = volumes
+        .iter_mut()
+        .find(|volume| volume.name == volume_name)
+        .and_then(|volume| volume.projected.as_mut())
+        .and_then(|projected| projected.sources.as_mut())
+        .ok_or_else(|| anyhow!("Volume {} holds no projected sources", volume_name))?;
+    project_file(sources, source, filename);
 
     Ok(RenderedArgument::String(variable.path.clone()))
+}
+
+/// Adds one file of a config map or a secret to a projected volume. Each config map and each
+/// secret gets one source of the volume, and that source lists each file the config reads from it.
+fn project_file(sources: &mut Vec<VolumeProjection>, source: &VariableSource, filename: String) {
+    let (source_name, source_key) = match source {
+        VariableSource::ConfigMapKeyRef(r) | VariableSource::SecretKeyRef(r) => (&r.name, &r.key),
+    };
+    let existing = sources
+        .iter()
+        .position(|projection| projection_name(projection, source) == Some(source_name.as_str()));
+    let index = match existing {
+        Some(index) => index,
+        None => {
+            sources.push(build_projection(source, source_name));
+            sources.len() - 1
+        }
+    };
+
+    let items = match source {
+        VariableSource::ConfigMapKeyRef(_) => sources[index]
+            .config_map
+            .as_mut()
+            .and_then(|config_map| config_map.items.as_mut()),
+        VariableSource::SecretKeyRef(_) => sources[index]
+            .secret
+            .as_mut()
+            .and_then(|secret| secret.items.as_mut()),
+    };
+    let Some(items) = items else {
+        // `build_projection` gives each projection a list of files, and nothing else writes these
+        // sources.
+        unreachable!("Expected the projection to hold a list of files");
+    };
+    let item = KeyToPath {
+        key: source_key.clone(),
+        mode: None,
+        path: filename,
+    };
+    if !items.contains(&item) {
+        items.push(item);
+    }
+}
+
+/// The name of the config map or the secret that the projection reads, when it reads the kind of
+/// source that `source` names.
+fn projection_name<'a>(
+    projection: &'a VolumeProjection,
+    source: &VariableSource,
+) -> Option<&'a str> {
+    match source {
+        VariableSource::ConfigMapKeyRef(_) => {
+            projection.config_map.as_ref().map(|c| c.name.as_str())
+        }
+        VariableSource::SecretKeyRef(_) => projection.secret.as_ref().map(|s| s.name.as_str()),
+    }
+}
+
+fn build_projection(source: &VariableSource, source_name: &str) -> VolumeProjection {
+    let mut projection = VolumeProjection::default();
+    match source {
+        VariableSource::ConfigMapKeyRef(_) => {
+            projection.config_map = Some(ConfigMapProjection {
+                items: Some(Vec::new()),
+                name: String::from(source_name),
+                optional: None,
+            });
+        }
+        VariableSource::SecretKeyRef(_) => {
+            projection.secret = Some(SecretProjection {
+                items: Some(Vec::new()),
+                name: String::from(source_name),
+                optional: None,
+            });
+        }
+    };
+    projection
 }

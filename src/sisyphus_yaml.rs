@@ -165,12 +165,13 @@ pub struct ServicePort {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VariableSource {
-    SecretKeyRef(KubernetesSecretKeyRef),
+    ConfigMapKeyRef(KubernetesKeyRef),
+    SecretKeyRef(KubernetesKeyRef),
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct KubernetesSecretKeyRef {
-    pub name: String,
+pub struct KubernetesKeyRef {
     pub key: String,
+    pub name: String,
 }
