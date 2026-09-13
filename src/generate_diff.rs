@@ -1,11 +1,13 @@
 use crate::kubernetes_io::{KubernetesKey, KubernetesResources};
 use anyhow::{anyhow, bail, Result};
 use kube::api::{DynamicObject, TypeMeta};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 #[cfg(test)]
 mod tests;
 
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum DiffAction {
     Delete,
     Create(DynamicObject),
@@ -16,6 +18,7 @@ pub(crate) enum DiffAction {
     },
 }
 
+#[derive(Debug, Deserialize, Serialize)]
 pub(crate) struct ResourceDiff {
     pub action: DiffAction,
     pub after: String,

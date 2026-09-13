@@ -20,6 +20,17 @@ pub(crate) struct PartialKey {
     namespace: Option<String>,
 }
 
+impl PartialKey {
+    /// Returns true if this filter has any filters set, else false.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.api_version.is_none()
+            && self.cluster.is_none()
+            && self.kind.is_none()
+            && self.name.is_none()
+            && self.namespace.is_none()
+    }
+}
+
 pub(crate) fn key_matches_filter(key: &KubernetesKey, filter: &PartialKey) -> bool {
     if let Some(v) = &filter.api_version {
         if &key.api_version != v {

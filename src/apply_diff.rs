@@ -1,16 +1,17 @@
 use anyhow::{bail, Context, Result};
-use kube::{api::{DeleteParams, DynamicObject, Patch, PatchParams}, discovery::Scope};
+use kube::{
+    api::{DeleteParams, DynamicObject, Patch, PatchParams},
+    discovery::Scope,
+};
 use sqlx::AnyPool;
 use std::time::Duration;
 use tokio::time::sleep;
 
 use crate::{
     generate_diff::{DiffAction, ResourceDiff},
-    kubernetes_io::{
-        get_kubernetes_api, get_kubernetes_clients, KubernetesKey, MANAGER,
-    },
+    kubernetes_io::{get_kubernetes_api, get_kubernetes_clients, KubernetesKey, MANAGER},
     object_policy::record_push,
-    output::{report_applied, ActionLabels},
+    output::{past_tense, report_applied},
 };
 
 pub(crate) async fn apply_diff(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()> {
@@ -21,21 +22,23 @@ pub(crate) async fn apply_diff(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Re
             bail!("Unable to find Kubernetes type for key {:?}", key);
         };
         match (&caps.scope, &key.namespace) {
-            (Scope::Cluster, None) => {},
-            (Scope::Cluster, Some(_)) =>
-                bail!("Creating a cluster-scoped resource with a namespace will fail"),
-            (Scope::Namespaced, Some(_)) => {},
-            (Scope::Namespaced, None) =>
-                bail!("Creating a namespaced-scoped resource without a namespace is disallowed"),
+            (Scope::Cluster, None) => {}
+            (Scope::Cluster, Some(_)) => {
+                bail!("Creating a cluster-scoped resource with a namespace will fail")
+            }
+            (Scope::Namespaced, Some(_)) => {}
+            (Scope::Namespaced, None) => {
+                bail!("Creating a namespaced-scoped resource without a namespace is disallowed")
+            }
         }
     }
     let mut pending_deletions: Vec<(kube::Api<DynamicObject>, String)> = Vec::new();
     for ResourceDiff { action, key, .. } in changed {
         let api = get_kubernetes_api(&key, &clients, &types)?;
         let is_delete = matches!(action, DiffAction::Delete);
-        let labels = ActionLabels::from(&action);
+        let verb = past_tense(&action);
         apply_single_diff(action, &key, &api, pool).await?;
-        report_applied(&key, labels);
+        report_applied(&key, verb);
         if is_delete {
             pending_deletions.push((api, key.name.clone()));
         }

@@ -20,7 +20,9 @@ pub(crate) struct ObjectRef {
 }
 
 impl ObjectRef {
-    pub fn new(kind: &str, namespace: &str, name: &str) -> Self {
+    /// The arguments come in the order of the fields, which is also the order of the `--kind`,
+    /// `--name`, and `--namespace` flags.
+    pub fn new(kind: &str, name: &str, namespace: &str) -> Self {
         ObjectRef {
             kind: kind.to_string(),
             name: name.to_string(),
@@ -89,8 +91,6 @@ pub(crate) struct ObjectStatus {
     pub name: String,
     pub namespace: String,
     pub pause: Option<ObjectPause>,
-    /// A one-word form of `pause`, for a caller that needs no other data.
-    pub state: &'static str,
 }
 
 #[derive(Debug)]
@@ -111,7 +111,11 @@ pub(crate) struct ObjectHistoryEntry {
     pub last_pushed_at: String,
 }
 
-pub(crate) async fn pause_object(reference: &ObjectRef, reason: &str, pool: &AnyPool) -> Result<()> {
+pub(crate) async fn pause_object(
+    reference: &ObjectRef,
+    reason: &str,
+    pool: &AnyPool,
+) -> Result<()> {
     if !PAUSABLE_KINDS.contains(&reference.kind.as_str()) {
         bail!(
             "{} isn't a Sisyphus kind; --kind takes one of {}",
@@ -119,26 +123,43 @@ pub(crate) async fn pause_object(reference: &ObjectRef, reason: &str, pool: &Any
             PAUSABLE_KINDS.join(", ")
         );
     }
-    // Use one transaction. A failure between the delete and the insert would leave the object in
-    // the unpaused state, and that is not safe.
-    let mut tx = pool.begin().await?;
-    sqlx::query("DELETE FROM object_pauses WHERE kind = $1 AND namespace = $2 AND name = $3")
-        .bind(&reference.kind)
-        .bind(&reference.namespace)
-        .bind(&reference.name)
-        .execute(&mut *tx)
-        .await?;
+    if !is_tracked(reference, pool).await? {
+        bail!(
+            "{} cannot be paused until after it is pushed for the first time",
+            reference
+        );
+    }
     sqlx::query(
-        "INSERT INTO object_pauses (kind, name, namespace, reason) VALUES ($1, $2, $3, $4)",
+        "INSERT INTO object_pauses (kind, name, namespace, reason) VALUES ($1, $2, $3, $4) \
+         ON CONFLICT (kind, namespace, name) DO UPDATE SET \
+         created_at = excluded.created_at, created_by = excluded.created_by, \
+         reason = excluded.reason",
     )
     .bind(&reference.kind)
     .bind(&reference.name)
     .bind(&reference.namespace)
     .bind(reason)
-    .execute(&mut *tx)
+    .execute(pool)
     .await?;
-    tx.commit().await?;
     Ok(())
+}
+
+/// Checks whether the database holds a matching object.
+async fn is_tracked(reference: &ObjectRef, pool: &AnyPool) -> Result<bool> {
+    let Some((api_version, rendered_kind)) = rendered_type(&reference.kind) else {
+        return Ok(true);
+    };
+    let row = sqlx::query(
+        "SELECT name FROM kubernetes_objects \
+         WHERE api_version = $1 AND kind = $2 AND name = $3 AND namespace = $4",
+    )
+    .bind(api_version)
+    .bind(rendered_kind)
+    .bind(&reference.name)
+    .bind(reference.rendered_namespace())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.is_some())
 }
 
 pub(crate) async fn resume_object(reference: &ObjectRef, pool: &AnyPool) -> Result<()> {
@@ -162,7 +183,7 @@ pub(crate) async fn load_pauses(pool: &AnyPool) -> Result<BTreeMap<ObjectRef, Ob
         .into_iter()
         .map(|pause| {
             (
-                ObjectRef::new(&pause.kind, &pause.namespace, &pause.name),
+                ObjectRef::new(&pause.kind, &pause.name, &pause.namespace),
                 pause,
             )
         })
@@ -179,20 +200,14 @@ async fn list_pauses(pool: &AnyPool) -> Result<Vec<ObjectPause>> {
     Ok(rows.iter().map(read_pause).collect())
 }
 
-/// All the data about one object. This function reads the database only. An object that is in the
-/// configuration files, but that had no push, has the state `tracking` and no deployment.
+/// Gets all data about one object. This function reads the database only.
 pub(crate) async fn get_status(reference: &ObjectRef, pool: &AnyPool) -> Result<ObjectStatus> {
-    let pause = get_pause(reference, pool).await?;
     Ok(ObjectStatus {
         deployed: deployed_images(reference, pool).await?,
         kind: reference.kind.clone(),
         name: reference.name.clone(),
         namespace: reference.namespace.clone(),
-        state: match pause {
-            Some(_) => "paused",
-            None => "tracking",
-        },
-        pause,
+        pause: get_pause(reference, pool).await?,
     })
 }
 
@@ -329,7 +344,10 @@ fn config_image(object: &DynamicObject) -> Option<&String> {
         .and_then(|a| a.get(CONFIG_IMAGE_ANNOTATION))
 }
 
-pub(crate) async fn get_pause(reference: &ObjectRef, pool: &AnyPool) -> Result<Option<ObjectPause>> {
+pub(crate) async fn get_pause(
+    reference: &ObjectRef,
+    pool: &AnyPool,
+) -> Result<Option<ObjectPause>> {
     let row = sqlx::query(
         "SELECT CAST(created_at AS TEXT) AS created_at, created_by, kind, name, namespace, reason \
          FROM object_pauses WHERE kind = $1 AND namespace = $2 AND name = $3",

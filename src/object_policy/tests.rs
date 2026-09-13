@@ -9,6 +9,19 @@ fn echo() -> ObjectRef {
     ObjectRef::new("Deployment", "echo", "echo")
 }
 
+/// Gives the database an object for `echo`. A pause needs one, because Sisyphus refuses to pause a
+/// resource it has never pushed.
+async fn tracked_echo(pool: &AnyPool) -> Result<()> {
+    insert_deployment(
+        "cluster1",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:a"),
+        pool,
+    )
+    .await
+}
+
 #[test]
 fn test_rendered_type_maps_only_the_kinds_with_a_config_image() {
     assert_eq!(rendered_type("Deployment"), Some(("apps/v1", "Deployment")));
@@ -20,12 +33,16 @@ fn test_rendered_type_maps_only_the_kinds_with_a_config_image() {
 #[tokio::test]
 async fn test_pause_and_resume() -> Result<()> {
     let pool = memory_pool().await?;
+    tracked_echo(&pool).await?;
 
     assert!(get_pause(&echo(), &pool).await?.is_none());
 
     pause_object(&echo(), "flapping", &pool).await?;
     assert_eq!(
-        get_pause(&echo(), &pool).await?.expect("expected a pause").reason,
+        get_pause(&echo(), &pool)
+            .await?
+            .expect("expected a pause")
+            .reason,
         "flapping"
     );
 
@@ -47,12 +64,13 @@ async fn test_pause_and_resume() -> Result<()> {
 #[tokio::test]
 async fn test_a_pause_is_scoped_to_one_object() -> Result<()> {
     let pool = memory_pool().await?;
+    tracked_echo(&pool).await?;
     pause_object(&echo(), "flapping", &pool).await?;
 
     // The same name with a different namespace or kind: no change to these objects.
     for other in [
-        ObjectRef::new("Deployment", "other", "echo"),
         ObjectRef::new("Deployment", "echo", "other"),
+        ObjectRef::new("Deployment", "other", "echo"),
         ObjectRef::new("CronJob", "echo", "echo"),
     ] {
         assert!(get_pause(&other, &pool).await?.is_none(), "{}", other);
@@ -65,7 +83,7 @@ async fn test_a_pause_is_scoped_to_one_object() -> Result<()> {
 async fn test_raw_yaml_can_be_paused() -> Result<()> {
     // A pause holds each object that the resource rendered, and the type of object does not matter.
     let pool = memory_pool().await?;
-    let raw = ObjectRef::new("KubernetesYaml", "echo", "ingress");
+    let raw = ObjectRef::new("KubernetesYaml", "ingress", "echo");
 
     pause_object(&raw, "migrating by hand", &pool).await?;
     assert!(get_pause(&raw, &pool).await?.is_some());
@@ -85,15 +103,53 @@ async fn test_an_unknown_kind_is_rejected() -> Result<()> {
     Ok(())
 }
 
+/// A pause names its resource by hand. A name that Sisyphus never pushed is a typo, and a pause
+/// that holds nothing back is worse than an error: the object keeps moving and nothing says so.
+#[tokio::test]
+async fn test_pausing_something_never_pushed_is_rejected() -> Result<()> {
+    let pool = memory_pool().await?;
+    insert_deployment(
+        "cluster1",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:a"),
+        &pool,
+    )
+    .await?;
+
+    for typo in [
+        ObjectRef::new("Deployment", "ecoh", "echo"),
+        ObjectRef::new("Deployment", "echo", "ecoh"),
+        ObjectRef::new("CronJob", "echo", "echo"),
+    ] {
+        assert!(
+            pause_object(&typo, "flapping", &pool).await.is_err(),
+            "{}",
+            typo
+        );
+        assert!(get_pause(&typo, &pool).await?.is_none(), "{}", typo);
+    }
+
+    // Sisyphus does not know what raw yaml renders, so it cannot check that kind.
+    pause_object(
+        &ObjectRef::new("KubernetesYaml", "anything", "echo"),
+        "migrating by hand",
+        &pool,
+    )
+    .await?;
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_history_and_status_are_empty_for_kinds_with_no_config_image() -> Result<()> {
     let pool = memory_pool().await?;
-    let raw = ObjectRef::new("KubernetesYaml", "echo", "ingress");
+    let raw = ObjectRef::new("KubernetesYaml", "ingress", "echo");
     pause_object(&raw, "migrating by hand", &pool).await?;
 
     assert!(list_history(&raw, &pool).await?.is_empty());
     let status = get_status(&raw, &pool).await?;
-    assert_eq!(status.state, "paused");
+    assert!(status.pause.is_some());
     assert!(status.deployed.is_empty());
 
     Ok(())
@@ -138,9 +194,33 @@ async fn test_record_push_skips_objects_with_no_config_image() -> Result<()> {
 async fn test_history_folds_clusters_and_runs_newest_first() -> Result<()> {
     let pool = memory_pool().await?;
     // The same image in two clusters is one version, and not two versions.
-    insert_history("cluster1", "echo", "echo", "reg/config@sha256:old", "2026-08-11 11:40:00+00", &pool).await?;
-    insert_history("cluster2", "echo", "echo", "reg/config@sha256:old", "2026-08-11 11:40:01+00", &pool).await?;
-    insert_history("cluster1", "echo", "echo", "reg/config@sha256:new", "2026-08-12 17:02:00+00", &pool).await?;
+    insert_history(
+        "cluster1",
+        "echo",
+        "echo",
+        "reg/config@sha256:old",
+        "2026-08-11 11:40:00+00",
+        &pool,
+    )
+    .await?;
+    insert_history(
+        "cluster2",
+        "echo",
+        "echo",
+        "reg/config@sha256:old",
+        "2026-08-11 11:40:01+00",
+        &pool,
+    )
+    .await?;
+    insert_history(
+        "cluster1",
+        "echo",
+        "echo",
+        "reg/config@sha256:new",
+        "2026-08-12 17:02:00+00",
+        &pool,
+    )
+    .await?;
 
     let history = list_history(&echo(), &pool).await?;
     assert_eq!(
@@ -163,9 +243,32 @@ async fn test_history_marks_what_is_deployed() -> Result<()> {
     // This flag makes the list a set of rollback targets, and not only a log. One entry is the
     // current version, and the other entries are the possible targets.
     let pool = memory_pool().await?;
-    insert_history("cluster1", "echo", "echo", "reg/config@sha256:old", "2026-08-11 11:40:00+00", &pool).await?;
-    insert_history("cluster1", "echo", "echo", "reg/config@sha256:new", "2026-08-12 17:02:00+00", &pool).await?;
-    insert_deployment("cluster1", "echo", "echo", Some("reg/config@sha256:new"), &pool).await?;
+    insert_history(
+        "cluster1",
+        "echo",
+        "echo",
+        "reg/config@sha256:old",
+        "2026-08-11 11:40:00+00",
+        &pool,
+    )
+    .await?;
+    insert_history(
+        "cluster1",
+        "echo",
+        "echo",
+        "reg/config@sha256:new",
+        "2026-08-12 17:02:00+00",
+        &pool,
+    )
+    .await?;
+    insert_deployment(
+        "cluster1",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:new"),
+        &pool,
+    )
+    .await?;
 
     let history = list_history(&echo(), &pool).await?;
     assert!(history[0].deployed);
@@ -177,11 +280,19 @@ async fn test_history_marks_what_is_deployed() -> Result<()> {
 #[tokio::test]
 async fn test_history_is_scoped_to_one_object() -> Result<()> {
     let pool = memory_pool().await?;
-    insert_history("cluster1", "echo", "echo", "reg/config@sha256:a", "2026-08-11 11:40:00+00", &pool).await?;
+    insert_history(
+        "cluster1",
+        "echo",
+        "echo",
+        "reg/config@sha256:a",
+        "2026-08-11 11:40:00+00",
+        &pool,
+    )
+    .await?;
 
     for other in [
-        ObjectRef::new("Deployment", "other", "echo"),
         ObjectRef::new("Deployment", "echo", "other"),
+        ObjectRef::new("Deployment", "other", "echo"),
         // A CronJob renders to batch/v1, and it cannot match the rows of the Deployment.
         ObjectRef::new("CronJob", "echo", "echo"),
     ] {
@@ -194,10 +305,16 @@ async fn test_history_is_scoped_to_one_object() -> Result<()> {
 #[tokio::test]
 async fn test_status_reports_a_plain_object() -> Result<()> {
     let pool = memory_pool().await?;
-    insert_deployment("cluster1", "echo", "echo", Some("reg/config@sha256:a"), &pool).await?;
+    insert_deployment(
+        "cluster1",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:a"),
+        &pool,
+    )
+    .await?;
 
     let status = get_status(&echo(), &pool).await?;
-    assert_eq!(status.state, "tracking");
     assert!(status.pause.is_none());
     assert_eq!(status.deployed.len(), 1);
     assert_eq!(status.deployed[0].cluster, "cluster1");
@@ -211,8 +328,22 @@ async fn test_status_shows_clusters_that_disagree() -> Result<()> {
     // Two clusters with different images is the condition that `status` must show. The report
     // gives both images, and it does not select one of them.
     let pool = memory_pool().await?;
-    insert_deployment("cluster1", "echo", "echo", Some("reg/config@sha256:a"), &pool).await?;
-    insert_deployment("cluster2", "echo", "echo", Some("reg/config@sha256:b"), &pool).await?;
+    insert_deployment(
+        "cluster1",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:a"),
+        &pool,
+    )
+    .await?;
+    insert_deployment(
+        "cluster2",
+        "echo",
+        "echo",
+        Some("reg/config@sha256:b"),
+        &pool,
+    )
+    .await?;
 
     let status = get_status(&echo(), &pool).await?;
     assert_eq!(
@@ -238,7 +369,7 @@ async fn test_status_is_not_an_error_for_something_never_pushed() -> Result<()> 
     let pool = memory_pool().await?;
 
     let status = get_status(&echo(), &pool).await?;
-    assert_eq!(status.state, "tracking");
+    assert!(status.pause.is_none());
     assert!(status.deployed.is_empty());
 
     Ok(())
@@ -249,10 +380,10 @@ async fn test_status_carries_the_pause_reason() -> Result<()> {
     // The reason is the important data. It tells you why this object has a different version from
     // the other objects.
     let pool = memory_pool().await?;
+    tracked_echo(&pool).await?;
     pause_object(&echo(), "flapping readiness probe", &pool).await?;
 
     let status = get_status(&echo(), &pool).await?;
-    assert_eq!(status.state, "paused");
     assert_eq!(
         status.pause.expect("expected a pause").reason,
         "flapping readiness probe"
@@ -279,7 +410,7 @@ async fn test_a_global_resource_uses_the_default_namespace() -> Result<()> {
     // empty text value. The queries must use the empty value, or `history` and `status` show
     // nothing for each resource in `global`.
     let pool = memory_pool().await?;
-    let global = ObjectRef::new("Deployment", GLOBAL_NAMESPACE, "echo");
+    let global = ObjectRef::new("Deployment", "echo", GLOBAL_NAMESPACE);
 
     record_push(
         &KubernetesKey {
@@ -414,7 +545,10 @@ fn rendered_deployment(namespace: &str, name: &str, config_image: Option<&str>) 
 
 fn deployment_yaml(namespace: &str, name: &str, config_image: Option<&str>) -> String {
     let annotations = match config_image {
-        Some(image) => format!("  annotations:\n    {}: {}\n", CONFIG_IMAGE_ANNOTATION, image),
+        Some(image) => format!(
+            "  annotations:\n    {}: {}\n",
+            CONFIG_IMAGE_ANNOTATION, image
+        ),
         None => "".to_string(),
     };
     format!(

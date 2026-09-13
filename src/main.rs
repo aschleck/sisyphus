@@ -8,6 +8,7 @@ mod kubernetes_io;
 mod kubernetes_rendering;
 mod object_policy;
 mod output;
+mod plan;
 mod registry_clients;
 mod sisyphus_yaml;
 mod starlark;
@@ -26,13 +27,14 @@ use crate::{
     },
     kubernetes_rendering::render_sisyphus_resource,
     object_policy::{
-        get_status, list_history, load_pauses, pause_object, resume_object, ObjectPause,
-        ObjectRef, GLOBAL_NAMESPACE,
+        get_status, list_history, load_pauses, pause_object, resume_object, ObjectPause, ObjectRef,
+        GLOBAL_NAMESPACE,
     },
     output::{
-        print_diff, report_applied, report_diffs, report_history, report_paused, report_status,
-        ActionLabels,
+        past_tense, print_diff, report_applied, report_diffs, report_history, report_paused,
+        report_status, report_unmatched_pauses,
     },
+    plan::{check_plan_is_current, read_plan, write_plan},
     registry_clients::{resolve_image_tag, RegistryClients},
     sisyphus_yaml::{HasConfigImage, HasKind, SisyphusResource},
 };
@@ -49,10 +51,10 @@ use kube::{
 use serde::Deserialize;
 use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, HashMap},
     fs::{self, File},
     io::Write,
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 #[derive(Parser, Debug)]
@@ -92,9 +94,38 @@ enum Commands {
         #[command(flatten)]
         yes: Consent,
     },
-    Push {
+    /// Write the changes of a push to a file, and apply nothing. Give the file to `push --plan`.
+    Plan {
         #[command(flatten)]
         args: PushArgs,
+
+        /// If the plan holds a change, exit with code 2. Otherwise, change and no-change both exit
+        /// with code 0.
+        #[arg(long)]
+        detailed_exitcode: bool,
+
+        /// The file to write the plan to. Sisyphus overwrites this file and sets the permissions to
+        /// owner-only.
+        #[arg(long)]
+        output: PathBuf,
+    },
+    Push {
+        #[command(flatten)]
+        database: Database,
+
+        #[command(flatten)]
+        filter: PartialKey,
+
+        /// The path to the directory of configuration files to monitor. Leave this out when you
+        /// give `--plan`.
+        #[arg(long, env = "MONITOR_DIRECTORY", required_unless_present = "plan")]
+        monitor_directory: Option<String>,
+
+        /// Apply the changes of a plan file from `sisyphus plan`. Sisyphus reads no configuration
+        /// file, renders nothing, and computes no diff. It applies what the plan holds. Sisyphus
+        /// refuses a plan whose objects changed in the database since the plan was made.
+        #[arg(long)]
+        plan: Option<PathBuf>,
 
         #[command(flatten)]
         yes: Consent,
@@ -215,7 +246,7 @@ struct ObjectKey {
 
 impl From<&ObjectKey> for ObjectRef {
     fn from(key: &ObjectKey) -> Self {
-        ObjectRef::new(&key.kind, &key.namespace, &key.name)
+        ObjectRef::new(&key.kind, &key.name, &key.namespace)
     }
 }
 
@@ -278,7 +309,7 @@ async fn main() -> std::process::ExitCode {
 
     let args = SisyphusArgs::parse();
     match run(args.command).await {
-        Ok(()) => std::process::ExitCode::SUCCESS,
+        Ok(exit_code) => exit_code,
         Err(error) => {
             eprintln!("Error: {:#}", error);
             std::process::ExitCode::FAILURE
@@ -286,22 +317,28 @@ async fn main() -> std::process::ExitCode {
     }
 }
 
-async fn run(command: Commands) -> Result<()> {
+/// The exit status of `plan --detailed-exitcode` when the plan holds a change. An error keeps the
+/// usual 1, and then a job can tell "there is something to push" from "the command failed".
+const CHANGES_EXIT_CODE: u8 = 2;
+
+async fn run(command: Commands) -> Result<std::process::ExitCode> {
+    let mut exit_code = std::process::ExitCode::SUCCESS;
     match command {
         Commands::App { app_command } => match app_command {
             AppCommands::RunConfig { args } => run_config(args).await?,
             AppCommands::RunImage { args } => run_image(args).await?,
         },
         Commands::Diff {
-            args: PushArgs {
-                database,
-                filter,
-                monitor_directory,
-            }
+            args:
+                PushArgs {
+                    database,
+                    filter,
+                    monitor_directory,
+                },
         } => {
             let pool = connect(&database).await?;
             let pauses = load_pauses(&pool).await?;
-            let changed = diff(
+            let (changed, _) = diff(
                 &filter,
                 &monitor_directory,
                 Scope::Everything(&pauses),
@@ -318,16 +355,58 @@ async fn run(command: Commands) -> Result<()> {
             let pool = connect(&database).await?;
             import(key.into(), yes.yes, &pool).await?
         }
+        Commands::Plan {
+            args:
+                PushArgs {
+                    database,
+                    filter,
+                    monitor_directory,
+                },
+            detailed_exitcode,
+            output,
+        } => {
+            let pool = connect(&database).await?;
+            let pauses = load_pauses(&pool).await?;
+            let (changed, from_database) = diff(
+                &filter,
+                &monitor_directory,
+                Scope::Everything(&pauses),
+                &pool,
+            )
+            .await?;
+            report_changes(&changed);
+            let has_changes = !changed.is_empty();
+            write_plan(changed, &from_database, &output)?;
+            println!("Wrote the plan to {}", output.display());
+            if detailed_exitcode && has_changes {
+                exit_code = std::process::ExitCode::from(CHANGES_EXIT_CODE);
+            }
+        }
         Commands::Push {
-            args: PushArgs {
-                database,
-                filter,
-                monitor_directory,
-            },
+            database,
+            filter,
+            monitor_directory,
+            plan,
             yes,
         } => {
             let pool = connect(&database).await?;
-            push(&filter, &monitor_directory, yes.yes, &pool).await?
+            match plan {
+                Some(path) => {
+                    if !filter.is_empty() {
+                        bail!(
+                            "`--plan` takes no filter. The plan holds the changes that the filter of \
+                             `sisyphus plan` chose, and this command applies all of them."
+                        );
+                    }
+                    apply_plan(&path, yes.yes, &pool).await?
+                }
+                // `required_unless_present` gives the monitor directory whenever there is no plan.
+                None => {
+                    let monitor_directory = monitor_directory
+                        .ok_or_else(|| anyhow!("--monitor-directory is required"))?;
+                    push(&filter, &monitor_directory, yes.yes, &pool).await?
+                }
+            }
         }
         Commands::Refresh { database, yes } => {
             let pool = connect(&database).await?;
@@ -335,15 +414,13 @@ async fn run(command: Commands) -> Result<()> {
         }
         Commands::Object { object_command } => object(object_command).await?,
     };
-    Ok(())
+    Ok(exit_code)
 }
 
 /// Connects to the database and gives it the name of the user.
 ///
 /// The audit tables from `create_audit_table` record the `app.username` and `app.user_id` session
-/// settings with each change. This function reads these two values from the environment, and not
-/// from flags. The server that starts this CLI knows the user, and it sets these values for each
-/// command from a session that it authenticated. Do not set these values from user input.
+/// settings with each change. This function reads these two values from the environment.
 ///
 /// The pool holds one connection only, and then these settings apply to each query. This code runs
 /// one query at a time on a single thread, and more connections give no advantage.
@@ -565,20 +642,25 @@ enum Scope<'a> {
     },
 }
 
+/// Renders the configuration, compares it with the database, and gives the changes of a push.
+///
+/// The second value is the database side of the comparison, as the database holds it and before
+/// `make_comparable` normalizes it. `plan` keeps it, and then `push --plan` can tell whether the
+/// state that a change describes is still there.
 async fn diff(
     filter: &PartialKey,
     monitor_directory: &str,
     scope: Scope<'_>,
     pool: &AnyPool,
-) -> Result<Vec<ResourceDiff>> {
+) -> Result<(Vec<ResourceDiff>, KubernetesResources)> {
     let mut registries = RegistryClients::new();
     let mut from_files = KubernetesResources {
         by_key: BTreeMap::new(),
         namespaces: BTreeMap::new(),
     };
-    // The objects that a paused resource rendered. Sisyphus must also ignore these objects on the
-    // database side.
-    let mut held = BTreeSet::new();
+    // The objects that each paused resource rendered. Sisyphus must also ignore these objects on
+    // the database side, and a pause that is not a key here matched no resource at all.
+    let mut held: BTreeMap<ObjectRef, Vec<KubernetesKey>> = BTreeMap::new();
     {
         let resources = get_sisyphus_resources_from_files(Path::new(&monitor_directory))?;
         render_sisyphus_resources(
@@ -636,6 +718,11 @@ async fn diff(
                     serde_yaml::from_str(&serde_yaml::to_string(&as_namespace).unwrap()).unwrap()
                 });
         }
+    }
+
+    if let Scope::Everything(pauses) = scope {
+        let unmatched: Vec<&ObjectRef> = pauses.keys().filter(|r| !held.contains_key(*r)).collect();
+        report_unmatched_pauses(&unmatched);
     }
 
     if let Scope::OneObject { reference, .. } = scope {
@@ -698,7 +785,8 @@ async fn diff(
 
     let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
-    generate_diff(comparable_database, comparable_files)
+    let changed = generate_diff(comparable_database, comparable_files)?;
+    Ok((changed, from_database))
 }
 
 async fn push(
@@ -710,11 +798,27 @@ async fn push(
     // Read the pauses one time here, and not for each object during the render. Then the render
     // code does not use the database.
     let pauses = load_pauses(pool).await?;
-    let changed = diff(filter, monitor_directory, Scope::Everything(&pauses), pool).await?;
+    let (changed, _) = diff(filter, monitor_directory, Scope::Everything(&pauses), pool).await?;
     report_changes(&changed);
     if changed.is_empty() {
-        return Ok(())
+        return Ok(());
     }
+    if !ask_for_user_permission("pushing", yes)? {
+        return Ok(());
+    }
+    apply_diff(changed, &pool).await?;
+    Ok(())
+}
+
+async fn apply_plan(path: &Path, yes: bool, pool: &AnyPool) -> Result<()> {
+    let planned = read_plan(path)?;
+    if planned.is_empty() {
+        report_changes(&[]);
+        return Ok(());
+    }
+    check_plan_is_current(&planned, &get_objects_from_database(pool).await?)?;
+    let changed: Vec<ResourceDiff> = planned.into_iter().map(|p| p.change).collect();
+    report_changes(&changed);
     if !ask_for_user_permission("pushing", yes)? {
         return Ok(());
     }
@@ -734,7 +838,7 @@ async fn push_one_object(
     yes: bool,
     pool: &AnyPool,
 ) -> Result<()> {
-    let changed = diff(
+    let (changed, _) = diff(
         &PartialKey::default(),
         monitor_directory,
         Scope::OneObject { image, reference },
@@ -777,9 +881,9 @@ async fn refresh(yes: bool, pool: &AnyPool) -> Result<()> {
 fn drop_held(
     from_database: &mut KubernetesResources,
     from_files: &KubernetesResources,
-    held: &BTreeSet<KubernetesKey>,
+    held: &BTreeMap<ObjectRef, Vec<KubernetesKey>>,
 ) {
-    for key in held {
+    for key in held.values().flatten() {
         from_database.by_key.remove(key);
         from_database.namespaces.remove(key);
 
@@ -831,7 +935,6 @@ async fn apply_refresh(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()>
 
 async fn refresh_group(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()> {
     for ResourceDiff { action, key, .. } in changed {
-        let labels = ActionLabels::from(&action);
         match &action {
             DiffAction::Create(w)
             | DiffAction::Patch { after: w, .. }
@@ -878,7 +981,7 @@ async fn refresh_group(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()>
                 .await?;
             }
         };
-        report_applied(&key, labels);
+        report_applied(&key, past_tense(&action));
     }
     Ok(())
 }
@@ -1104,7 +1207,7 @@ async fn render_sisyphus_resources(
     by_key: &mut BTreeMap<KubernetesKey, DynamicObject>,
     registries: &mut RegistryClients,
     scope: Scope<'_>,
-    held: &mut BTreeSet<KubernetesKey>,
+    held: &mut BTreeMap<ObjectRef, Vec<KubernetesKey>>,
 ) -> Result<()> {
     for (key, object) in objects {
         // The address of the object on the command line: the kind as its yaml writes it, and the
@@ -1119,8 +1222,8 @@ async fn render_sisyphus_resources(
                     unreachable!("These should already have been loaded")
                 }
             },
-            maybe_namespace.as_deref().unwrap_or(GLOBAL_NAMESPACE),
             &key.name,
+            maybe_namespace.as_deref().unwrap_or(GLOBAL_NAMESPACE),
         );
 
         // An object push ignores each other resource. A render of a resource gets its config image
@@ -1128,7 +1231,10 @@ async fn render_sisyphus_resources(
         // registry to reply and each other resource to render correctly.
         let config_image = match scope {
             Scope::Everything(_) => None,
-            Scope::OneObject { image, reference: target } => {
+            Scope::OneObject {
+                image,
+                reference: target,
+            } => {
                 if &reference != target {
                     continue;
                 }
@@ -1182,7 +1288,7 @@ async fn render_sisyphus_resources(
             Some(pause) => {
                 let keys: Vec<_> = rendered.into_keys().collect();
                 report_paused(pause, &keys);
-                held.extend(keys);
+                held.insert(reference, keys);
             }
             None => by_key.extend(rendered),
         }
@@ -1220,8 +1326,7 @@ fn ask_for_user_permission(verb: &str, yes: bool) -> Result<bool> {
         return Ok(true);
     }
 
-    // The prompt is a message to the user, and not output data. On stdout it would go into the
-    // JSON stream that a `--output json` caller reads.
+    // The prompt is a message to the user, and not output data.
     eprint!("Continue {}? y/(n): ", verb);
     std::io::stderr().flush()?;
     let mut response = String::new();

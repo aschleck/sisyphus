@@ -364,6 +364,31 @@ sisyphus refresh \
     --database-url 'postgres://user:password@some.server/sisyphus'
 ````
 
+### Reviewing a push before it applies
+
+The `plan` command does everything `push` does except the apply. It renders your configuration,
+compares it with the database, and writes the changes to a file.
+
+````bash
+sisyphus plan \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --monitor-directory './production' \
+    --output ./push.json
+````
+
+`push --plan` then applies the changes in that file to your cluster. Prior to applying it checks if
+the plan still matches the cluster state, and aborts if there are differences.
+
+````bash
+sisyphus push \
+    --database-url 'postgres://user:password@some.server/sisyphus' \
+    --plan ./push.json --yes
+````
+
+When the `--detailed-exitcode` flag is set, `plan` exits with status code 2 when the plan contains
+a difference. Otherwise, `plan` exits with status code 0 regardless of whether the plan contains any
+changes.
+
 ### Pausing an object
 
 A pause makes Sisyphus pushes skip an object. Use a pause when one object is not correct, and you

@@ -5,23 +5,14 @@ use crate::{
 };
 use console::{style, Style};
 use similar::{ChangeTag, TextDiff};
+use std::collections::BTreeMap;
 
-/// The name of an action in a report. The code copies this name before the apply step uses the
-/// action. Then it is not necessary to copy the full object only to name it after the apply step.
-#[derive(Clone, Copy)]
-pub(crate) struct ActionLabels {
-    past_tense: &'static str,
-}
-
-impl From<&DiffAction> for ActionLabels {
-    fn from(action: &DiffAction) -> Self {
-        let past_tense = match action {
-            DiffAction::Create(_) => "Created",
-            DiffAction::Delete => "Deleted",
-            DiffAction::Patch { .. } => "Updated",
-            DiffAction::Recreate(_) => "Recreated",
-        };
-        ActionLabels { past_tense }
+pub(crate) fn past_tense(action: &DiffAction) -> &'static str {
+    match action {
+        DiffAction::Create(_) => "Created",
+        DiffAction::Delete => "Deleted",
+        DiffAction::Patch { .. } => "Updated",
+        DiffAction::Recreate(_) => "Recreated",
     }
 }
 
@@ -34,9 +25,7 @@ pub(crate) fn report_diffs(diffs: &[ResourceDiff]) {
     }
 }
 
-/// Reports an object that a pause keeps out of the push, and gives the names of the Kubernetes
-/// objects in that pause. One Sisyphus object can render more than one Kubernetes object. For
-/// example, a Deployment also renders a Service. The list shows the full range of the pause.
+/// Reports an object (and its children) that is being skipped in a push due to a pause.
 pub(crate) fn report_paused(pause: &ObjectPause, held: &[KubernetesKey]) {
     let reference = ObjectRef::new(&pause.kind, &pause.namespace, &pause.name);
     // This is a progress message and not a change, and it goes to stderr with the other messages.
@@ -47,8 +36,19 @@ pub(crate) fn report_paused(pause: &ObjectPause, held: &[KubernetesKey]) {
 }
 
 /// Reports a change that Sisyphus made to the cluster and to the database.
-pub(crate) fn report_applied(key: &KubernetesKey, action: ActionLabels) {
-    println!("{} {}", action.past_tense, key);
+pub(crate) fn report_applied(key: &KubernetesKey, past_tense: &str) {
+    println!("{} {}", past_tense, key);
+}
+
+/// Reports each pause that matched nothing.
+pub(crate) fn report_unmatched_pauses(unmatched: &[&ObjectRef]) {
+    for reference in unmatched {
+        eprintln!(
+            "{}: {} is paused, and the configuration has no such resource",
+            style("Warning").yellow(),
+            reference
+        );
+    }
 }
 
 /// All the data that controls one object.
@@ -61,13 +61,16 @@ pub(crate) fn report_status(status: &ObjectStatus) {
         ))
         .bold()
     );
-    println!("  State    {}", styled_state(status.state));
     match &status.pause {
         Some(pause) => {
-            println!("  Paused   {}", pause.reason);
-            println!("           {}", style(attribution(&pause.created_by, &pause.created_at)).dim());
+            println!("  State    {}", style("paused").yellow());
+            println!("  Reason   {}", pause.reason);
+            println!(
+                "           {}",
+                style(attribution(&pause.created_by, &pause.created_at)).dim()
+            );
         }
-        None => println!("  Paused   {}", style("no").dim()),
+        None => println!("  State    {}", style("tracking").green()),
     }
     println!("\n  Deployed");
     if status.deployed.is_empty() {
@@ -76,16 +79,25 @@ pub(crate) fn report_status(status: &ObjectStatus) {
     }
     // Usually each cluster runs the same image, and one line shows this. If the clusters have
     // different images, each image gets its own line.
-    let mut by_image: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+    let mut by_image: BTreeMap<&str, Vec<&str>> = Default::default();
     for entry in &status.deployed {
         by_image
             .entry(entry.image.as_str())
             .or_default()
             .push(entry.cluster.as_str());
     }
-    let width = by_image.values().map(|c| c.join(", ").len()).max().unwrap_or(0);
+    let width = by_image
+        .values()
+        .map(|c| c.join(", ").len())
+        .max()
+        .unwrap_or(0);
     for (image, clusters) in by_image {
-        println!("    {:width$}  {}", clusters.join(", "), image, width = width);
+        println!(
+            "    {:width$}  {}",
+            clusters.join(", "),
+            image,
+            width = width
+        );
     }
 }
 
@@ -126,13 +138,6 @@ fn attribution(created_by: &Option<String>, created_at: &str) -> String {
     match created_by {
         Some(who) => format!("{}, {}", who, created_at),
         None => created_at.to_string(),
-    }
-}
-
-fn styled_state(state: &str) -> console::StyledObject<&str> {
-    match state {
-        "paused" => style(state).yellow(),
-        _ => style(state).green(),
     }
 }
 

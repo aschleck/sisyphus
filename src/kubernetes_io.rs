@@ -5,6 +5,7 @@ use kube::{
     discovery::{ApiCapabilities, Scope},
     Discovery, ResourceExt,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::{
     collections::{BTreeMap, HashMap},
@@ -14,7 +15,7 @@ use std::{
 #[cfg(test)]
 mod tests;
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 pub(crate) struct KubernetesKey {
     pub name: String,
     pub kind: String,
