@@ -54,7 +54,8 @@ variables: {variables}
     )
 }
 
-/// The name of the secret, the bundle, or the signer that `variable` of the Deployment `name` reads.
+/// What `variable` of the Deployment `name` reads: the name of its secret, bundle, or signer, its
+/// field, or its audience.
 fn source_name(
     resources: &SisyphusResources,
     namespace: &str,
@@ -80,7 +81,10 @@ fn source_name(
             VariableSource::ConfigMapKeyRef(r) | VariableSource::SecretKeyRef(r) => {
                 Some(r.name.clone())
             }
+            VariableSource::FieldRef(r) => Some(r.field_path.clone()),
             VariableSource::PodCertificate(c) => Some(c.signer_name.clone()),
+            VariableSource::ResourceFieldRef(r) => Some(r.resource.clone()),
+            VariableSource::ServiceAccountToken(t) => t.audience.clone(),
         })
 }
 
@@ -212,6 +216,9 @@ fn test_nested_index_variables_stay_in_their_sources() -> Result<()> {
 fn test_variables_read_each_kind_of_source() -> Result<()> {
     let sources = r#"{
         credentials: {podCertificate: {keyType: ECDSAP256, signerName: escalante.bio/workload}},
+        memory: {resourceFieldRef: {resource: limits.memory, divisor: 1Mi}},
+        namespace: {fieldRef: {fieldPath: metadata.namespace}},
+        sts-token: {serviceAccountToken: {audience: sts.escalante.bio, expirationSeconds: 3600}},
         trust-bundle: {clusterTrustBundleRef: {
             signerName: escalante.bio/workload,
             labelSelector: {matchLabels: {escalante.bio/trust: root}},
@@ -229,14 +236,21 @@ fn test_variables_read_each_kind_of_source() -> Result<()> {
     let resources = get_sisyphus_resources_from_files(root.path())?;
 
     for namespace in ["april", "joe"] {
-        assert_eq!(
-            source_name(&resources, namespace, "echo", "credentials").as_deref(),
-            Some("escalante.bio/workload")
-        );
-        assert_eq!(
-            source_name(&resources, namespace, "echo", "trust-bundle").as_deref(),
-            Some("escalante.bio/workload")
-        );
+        for (variable, expected) in [
+            ("credentials", "escalante.bio/workload"),
+            ("memory", "limits.memory"),
+            ("namespace", "metadata.namespace"),
+            ("sts-token", "sts.escalante.bio"),
+            ("trust-bundle", "escalante.bio/workload"),
+        ] {
+            assert_eq!(
+                source_name(&resources, namespace, "echo", variable).as_deref(),
+                Some(expected),
+                "{} in {}",
+                variable,
+                namespace
+            );
+        }
     }
     Ok(())
 }

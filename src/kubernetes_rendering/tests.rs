@@ -1603,31 +1603,127 @@ fn test_render_argument_file_variable_from_pod_certificate() -> Result<()> {
 /// A pod certificate is a file, so a string variable cannot read one.
 #[test]
 fn test_render_argument_string_variable_rejects_a_pod_certificate() {
-    use crate::config_image::StringVariable;
     use crate::sisyphus_yaml::PodCertificate;
 
-    let arg = ArgumentValues::Uniform(Argument::StringVariable(StringVariable {
-        name: "file".to_string(),
-    }));
-    let variables = BTreeMap::from([(
-        "file".to_string(),
-        VariableSource::PodCertificate(PodCertificate {
-            key_type: "ECDSAP256".to_string(),
-            max_expiration_seconds: None,
-            signer_name: "escalante.bio/workload".to_string(),
-        }),
-    )]);
-
-    let error = render_argument(
-        &arg,
-        "prod",
-        &BTreeMap::new(),
-        &mut BTreeMap::new(),
-        &variables,
-        &mut Vec::new(),
-        &mut Vec::new(),
-    )
+    let error = render_string_variable_from(VariableSource::PodCertificate(PodCertificate {
+        key_type: "ECDSAP256".to_string(),
+        max_expiration_seconds: None,
+        signer_name: "escalante.bio/workload".to_string(),
+    }))
     .expect_err("Expected a string variable to reject a pod certificate");
+    assert!(
+        error.to_string().contains("is a file and not a string"),
+        "unexpected error: {}",
+        error
+    );
+}
+
+#[test]
+fn test_render_argument_string_variable_from_field_ref() -> Result<()> {
+    use crate::sisyphus_yaml::FieldRef;
+
+    let source = render_string_variable_from(VariableSource::FieldRef(FieldRef {
+        field_path: "metadata.namespace".to_string(),
+    }))?;
+
+    let field = source.field_ref.expect("Expected a field ref");
+    assert_eq!(field.field_path, "metadata.namespace");
+    assert_eq!(field.api_version, None);
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_file_variable_from_field_ref() -> Result<()> {
+    use crate::sisyphus_yaml::FieldRef;
+
+    let (volumes, _) = render_file_variable_from(VariableSource::FieldRef(FieldRef {
+        field_path: "metadata.namespace".to_string(),
+    }))?;
+
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    let items = sources[0]
+        .downward_api
+        .as_ref()
+        .and_then(|downward| downward.items.as_ref())
+        .expect("Expected a downward API source with files");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].path, "file.pem");
+    assert_eq!(
+        items[0].field_ref.as_ref().map(|f| f.field_path.as_str()),
+        Some("metadata.namespace")
+    );
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_string_variable_from_resource_field_ref() -> Result<()> {
+    use crate::sisyphus_yaml::ResourceFieldRef;
+
+    let source = render_string_variable_from(VariableSource::ResourceFieldRef(ResourceFieldRef {
+        divisor: Some(Quantity("1Mi".to_string())),
+        resource: "limits.memory".to_string(),
+    }))?;
+
+    let field = source
+        .resource_field_ref
+        .expect("Expected a resource field ref");
+    assert_eq!(field.resource, "limits.memory");
+    assert_eq!(field.divisor, Some(Quantity("1Mi".to_string())));
+    assert_eq!(field.container_name, None);
+    Ok(())
+}
+
+/// A resource field projects into a file only when it names its container, which the config can't.
+#[test]
+fn test_render_argument_file_variable_rejects_a_resource_field_ref() {
+    use crate::sisyphus_yaml::ResourceFieldRef;
+
+    let error = render_file_variable_from(VariableSource::ResourceFieldRef(ResourceFieldRef {
+        divisor: None,
+        resource: "limits.memory".to_string(),
+    }))
+    .expect_err("Expected a file variable to reject a resource field");
+    assert!(
+        error.to_string().contains("is a string and not a file"),
+        "unexpected error: {}",
+        error
+    );
+}
+
+#[test]
+fn test_render_argument_file_variable_from_service_account_token() -> Result<()> {
+    use crate::sisyphus_yaml::ServiceAccountToken;
+
+    let (volumes, _) =
+        render_file_variable_from(VariableSource::ServiceAccountToken(ServiceAccountToken {
+            audience: Some("sts.escalante.bio".to_string()),
+            expiration_seconds: Some(3600),
+        }))?;
+
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    let token = sources[0]
+        .service_account_token
+        .as_ref()
+        .expect("Expected a service account token source");
+    assert_eq!(token.audience.as_deref(), Some("sts.escalante.bio"));
+    assert_eq!(token.expiration_seconds, Some(3600));
+    assert_eq!(token.path, "file.pem");
+    Ok(())
+}
+
+/// A service account token is a file, so a string variable cannot read one.
+#[test]
+fn test_render_argument_string_variable_rejects_a_service_account_token() {
+    use crate::sisyphus_yaml::ServiceAccountToken;
+
+    let error =
+        render_string_variable_from(VariableSource::ServiceAccountToken(ServiceAccountToken {
+            audience: None,
+            expiration_seconds: None,
+        }))
+        .expect_err("Expected a string variable to reject a service account token");
     assert!(
         error.to_string().contains("is a file and not a string"),
         "unexpected error: {}",
@@ -1656,6 +1752,29 @@ fn render_file_variable_from(source: VariableSource) -> Result<(Vec<Volume>, Vec
         &mut volume_mounts,
     )?;
     Ok((volumes, volume_mounts))
+}
+
+/// Renders a string variable that reads `source`, and gives where its value comes from.
+fn render_string_variable_from(source: VariableSource) -> Result<EnvVarSource> {
+    use crate::config_image::StringVariable;
+
+    let arg = ArgumentValues::Uniform(Argument::StringVariable(StringVariable {
+        name: "value".to_string(),
+    }));
+    let variables = BTreeMap::from([("value".to_string(), source)]);
+    let rendered = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut BTreeMap::new(),
+        &variables,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )?;
+    let Some(RenderedArgument::ValueFrom(source)) = rendered else {
+        panic!("Expected the variable to render as a ValueFrom");
+    };
+    Ok(source)
 }
 
 #[test]

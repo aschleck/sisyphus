@@ -1,4 +1,4 @@
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+use k8s_openapi::apimachinery::pkg::{api::resource::Quantity, apis::meta::v1::LabelSelector};
 use kube::api::DynamicObject;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -181,8 +181,11 @@ pub struct ServicePort {
 pub enum VariableSource {
     ClusterTrustBundleRef(ClusterTrustBundleRef),
     ConfigMapKeyRef(KubernetesKeyRef),
+    FieldRef(FieldRef),
     PodCertificate(PodCertificate),
+    ResourceFieldRef(ResourceFieldRef),
     SecretKeyRef(KubernetesKeyRef),
+    ServiceAccountToken(ServiceAccountToken),
 }
 
 /// A cluster trust bundle carries one blob of trust anchors, so a reference to one names no key. It
@@ -193,6 +196,13 @@ pub struct ClusterTrustBundleRef {
     pub label_selector: Option<LabelSelector>,
     pub name: Option<String>,
     pub signer_name: Option<String>,
+}
+
+/// A field of the pod itself, such as `metadata.namespace` or `status.podIP`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct FieldRef {
+    pub field_path: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -210,4 +220,20 @@ pub struct PodCertificate {
     pub key_type: String,
     pub max_expiration_seconds: Option<i32>,
     pub signer_name: String,
+}
+
+/// A request or a limit of the container itself, such as `limits.memory`, in units of `divisor`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ResourceFieldRef {
+    pub divisor: Option<Quantity>,
+    pub resource: String,
+}
+
+/// A token for the pod's service account that kubelet requests for `audience` and rotates.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ServiceAccountToken {
+    pub audience: Option<String>,
+    pub expiration_seconds: Option<i64>,
 }

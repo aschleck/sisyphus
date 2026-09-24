@@ -18,11 +18,12 @@ use k8s_openapi::{
         batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
             ClusterTrustBundleProjection, ConfigMapKeySelector, ConfigMapProjection, Container,
-            ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, KeyToPath,
-            PodCertificateProjection, PodSecurityContext, PodSpec, PodTemplateSpec,
-            Probe as KubeProbe, ProjectedVolumeSource, ResourceRequirements, SecretKeySelector,
-            SecretProjection, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
-            VolumeProjection,
+            ContainerPort, DownwardAPIProjection, DownwardAPIVolumeFile, EnvVar, EnvVarSource,
+            HTTPGetAction, KeyToPath, ObjectFieldSelector, PodCertificateProjection,
+            PodSecurityContext, PodSpec, PodTemplateSpec, Probe as KubeProbe,
+            ProjectedVolumeSource, ResourceFieldSelector, ResourceRequirements, SecretKeySelector,
+            SecretProjection, Service, ServiceAccountTokenProjection, ServicePort, ServiceSpec,
+            Volume, VolumeMount, VolumeProjection,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -759,11 +760,24 @@ fn render_argument(
                         optional: None,
                     });
                 }
+                VariableSource::FieldRef(v) => {
+                    source.field_ref = Some(ObjectFieldSelector {
+                        api_version: None,
+                        field_path: v.field_path.clone(),
+                    });
+                }
                 VariableSource::PodCertificate(_) => {
                     bail!(
                         "Variable {} reads a pod certificate, which is a file and not a string",
                         v.name,
                     );
+                }
+                VariableSource::ResourceFieldRef(v) => {
+                    source.resource_field_ref = Some(ResourceFieldSelector {
+                        container_name: None,
+                        divisor: v.divisor.clone(),
+                        resource: v.resource.clone(),
+                    });
                 }
                 VariableSource::SecretKeyRef(v) => {
                     source.secret_key_ref = Some(SecretKeySelector {
@@ -771,6 +785,13 @@ fn render_argument(
                         key: v.key.clone(),
                         optional: None,
                     });
+                }
+                VariableSource::ServiceAccountToken(_) => {
+                    bail!(
+                        "Variable {} reads a service account token, which is a file and not a \
+                         string",
+                        v.name,
+                    );
                 }
             };
             RenderedArgument::ValueFrom(source)
@@ -784,6 +805,14 @@ fn render_file_variable(
     volumes: &mut Vec<Volume>,
     volume_mounts: &mut Vec<VolumeMount>,
 ) -> Result<RenderedArgument> {
+    // A resource field projects into a file only when it names its container, and the config
+    // doesn't know the container's name.
+    if let VariableSource::ResourceFieldRef(_) = source {
+        bail!(
+            "Variable {} reads a resource field, which is a string and not a file",
+            variable.name
+        );
+    }
     let path = Path::new(&variable.path);
     let filename = String::from(
         path.file_name()
@@ -841,31 +870,16 @@ fn project_file(
     filename: String,
 ) -> Result<()> {
     let (source_name, source_key) = match source {
-        // A bundle and a pod certificate each project as one blob under one path, so each file
-        // takes a source of its own instead of sharing one the way keys of a config map do.
-        VariableSource::ClusterTrustBundleRef(bundle) => {
-            let mut projection = VolumeProjection::default();
-            projection.cluster_trust_bundle = Some(project_cluster_trust_bundle(bundle, filename)?);
-            if !sources.contains(&projection) {
-                sources.push(projection);
-            }
-            return Ok(());
-        }
-        VariableSource::PodCertificate(certificate) => {
-            let mut projection = VolumeProjection::default();
-            projection.pod_certificate = Some(PodCertificateProjection {
-                credential_bundle_path: Some(filename),
-                key_type: certificate.key_type.clone(),
-                max_expiration_seconds: certificate.max_expiration_seconds,
-                signer_name: certificate.signer_name.clone(),
-                ..Default::default()
-            });
-            if !sources.contains(&projection) {
-                sources.push(projection);
-            }
-            return Ok(());
-        }
         VariableSource::ConfigMapKeyRef(r) | VariableSource::SecretKeyRef(r) => (&r.name, &r.key),
+        // Every other source projects as one blob under one path, so each file takes a source of
+        // its own instead of sharing one the way keys of a config map do.
+        _ => {
+            let projection = project_blob(source, filename)?;
+            if !sources.contains(&projection) {
+                sources.push(projection);
+            }
+            return Ok(());
+        }
     };
     let existing = sources
         .iter()
@@ -879,8 +893,12 @@ fn project_file(
     };
 
     let items = match source {
-        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
-            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        VariableSource::ClusterTrustBundleRef(_)
+        | VariableSource::FieldRef(_)
+        | VariableSource::PodCertificate(_)
+        | VariableSource::ResourceFieldRef(_)
+        | VariableSource::ServiceAccountToken(_) => {
+            unreachable!("project_file shares sources only among config map and secret files")
         }
         VariableSource::ConfigMapKeyRef(_) => sources[index]
             .config_map
@@ -905,6 +923,51 @@ fn project_file(
         items.push(item);
     }
     Ok(())
+}
+
+/// Projects one file of a source that is not a config map or a secret.
+fn project_blob(source: &VariableSource, path: String) -> Result<VolumeProjection> {
+    let mut projection = VolumeProjection::default();
+    match source {
+        VariableSource::ClusterTrustBundleRef(bundle) => {
+            projection.cluster_trust_bundle = Some(project_cluster_trust_bundle(bundle, path)?);
+        }
+        VariableSource::ConfigMapKeyRef(_) | VariableSource::SecretKeyRef(_) => {
+            unreachable!("project_file projects config map and secret files itself")
+        }
+        VariableSource::FieldRef(field) => {
+            projection.downward_api = Some(DownwardAPIProjection {
+                items: Some(vec![DownwardAPIVolumeFile {
+                    field_ref: Some(ObjectFieldSelector {
+                        api_version: None,
+                        field_path: field.field_path.clone(),
+                    }),
+                    path,
+                    ..Default::default()
+                }]),
+            });
+        }
+        VariableSource::PodCertificate(certificate) => {
+            projection.pod_certificate = Some(PodCertificateProjection {
+                credential_bundle_path: Some(path),
+                key_type: certificate.key_type.clone(),
+                max_expiration_seconds: certificate.max_expiration_seconds,
+                signer_name: certificate.signer_name.clone(),
+                ..Default::default()
+            });
+        }
+        VariableSource::ResourceFieldRef(_) => {
+            unreachable!("render_file_variable refuses a resource field")
+        }
+        VariableSource::ServiceAccountToken(token) => {
+            projection.service_account_token = Some(ServiceAccountTokenProjection {
+                audience: token.audience.clone(),
+                expiration_seconds: token.expiration_seconds,
+                path,
+            });
+        }
+    }
+    Ok(projection)
 }
 
 /// Projects a bundle that the ref names, or the bundles of a signer that its selector matches.
@@ -945,8 +1008,12 @@ fn projection_name<'a>(
     source: &VariableSource,
 ) -> Option<&'a str> {
     match source {
-        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
-            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        VariableSource::ClusterTrustBundleRef(_)
+        | VariableSource::FieldRef(_)
+        | VariableSource::PodCertificate(_)
+        | VariableSource::ResourceFieldRef(_)
+        | VariableSource::ServiceAccountToken(_) => {
+            unreachable!("project_file shares sources only among config map and secret files")
         }
         VariableSource::ConfigMapKeyRef(_) => {
             projection.config_map.as_ref().map(|c| c.name.as_str())
@@ -958,8 +1025,12 @@ fn projection_name<'a>(
 fn build_projection(source: &VariableSource, source_name: &str) -> VolumeProjection {
     let mut projection = VolumeProjection::default();
     match source {
-        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
-            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        VariableSource::ClusterTrustBundleRef(_)
+        | VariableSource::FieldRef(_)
+        | VariableSource::PodCertificate(_)
+        | VariableSource::ResourceFieldRef(_)
+        | VariableSource::ServiceAccountToken(_) => {
+            unreachable!("project_file shares sources only among config map and secret files")
         }
         VariableSource::ConfigMapKeyRef(_) => {
             projection.config_map = Some(ConfigMapProjection {
