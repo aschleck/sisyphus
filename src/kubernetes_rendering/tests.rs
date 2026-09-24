@@ -1296,6 +1296,369 @@ fn test_render_argument_file_variables_mix_sources_at_one_path() -> Result<()> {
 }
 
 #[test]
+fn test_render_argument_file_variable_from_cluster_trust_bundle() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::ClusterTrustBundleRef;
+
+    let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+        name: "trust-anchors".to_string(),
+        path: "/etc/trust/ca.crt".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "trust-anchors".to_string(),
+        VariableSource::ClusterTrustBundleRef(ClusterTrustBundleRef {
+            label_selector: None,
+            name: Some("escalante.bio-root".to_string()),
+            signer_name: None,
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    let result = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut ports,
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )?;
+
+    let Some(RenderedArgument::String(path)) = result else {
+        panic!("Expected String variant");
+    };
+    assert_eq!(path, "/etc/trust/ca.crt");
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volumes[0].name, "trust-anchors");
+    assert_eq!(default_mode(&volumes[0]), Some(420));
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    assert!(sources[0].config_map.is_none());
+    assert!(sources[0].secret.is_none());
+    let bundle = sources[0]
+        .cluster_trust_bundle
+        .as_ref()
+        .expect("Expected a cluster trust bundle source");
+    assert_eq!(bundle.name.as_deref(), Some("escalante.bio-root"));
+    assert_eq!(bundle.path, "ca.crt");
+    assert_eq!(bundle.signer_name, None);
+
+    assert_eq!(volume_mounts.len(), 1);
+    assert_eq!(volume_mounts[0].name, "trust-anchors");
+    assert_eq!(volume_mounts[0].mount_path, "/etc/trust");
+    assert_eq!(volume_mounts[0].read_only, Some(true));
+    Ok(())
+}
+
+/// A bundle and a secret that hold files of one directory belong in one volume, the way two
+/// secrets do. The bundle takes a source of its own because it projects under a single path.
+#[test]
+fn test_render_argument_cluster_trust_bundle_shares_a_volume() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::{ClusterTrustBundleRef, KubernetesKeyRef};
+
+    let variables = BTreeMap::from([
+        (
+            "serving-key".to_string(),
+            VariableSource::SecretKeyRef(KubernetesKeyRef {
+                key: "tls.key".to_string(),
+                name: "serving".to_string(),
+            }),
+        ),
+        (
+            "trust-anchors".to_string(),
+            VariableSource::ClusterTrustBundleRef(ClusterTrustBundleRef {
+                label_selector: None,
+                name: Some("escalante.bio-root".to_string()),
+                signer_name: None,
+            }),
+        ),
+    ]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    for (name, path) in [
+        ("serving-key", "/etc/trust/tls.key"),
+        ("trust-anchors", "/etc/trust/ca.crt"),
+    ] {
+        let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+            name: name.to_string(),
+            path: path.to_string(),
+        }));
+        render_argument(
+            &arg,
+            "prod",
+            &BTreeMap::new(),
+            &mut ports,
+            &variables,
+            &mut volumes,
+            &mut volume_mounts,
+        )?;
+    }
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(volume_mounts.len(), 1);
+    // The secret mounted the directory first, so the volume carries its variable's name.
+    assert_eq!(volumes[0].name, "serving-key");
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(
+        sources.len(),
+        2,
+        "one secret and one bundle are two sources"
+    );
+    assert!(sources[0].secret.is_some());
+    assert!(sources[1].cluster_trust_bundle.is_some());
+    Ok(())
+}
+
+/// Reading one bundle twice must not project it twice, because kubelet writes one file per source.
+#[test]
+fn test_render_argument_cluster_trust_bundle_projected_once() -> Result<()> {
+    use crate::config_image::FileVariable;
+    use crate::sisyphus_yaml::ClusterTrustBundleRef;
+
+    let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+        name: "trust-anchors".to_string(),
+        path: "/etc/trust/ca.crt".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "trust-anchors".to_string(),
+        VariableSource::ClusterTrustBundleRef(ClusterTrustBundleRef {
+            label_selector: None,
+            name: Some("escalante.bio-root".to_string()),
+            signer_name: None,
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    for _ in 0..2 {
+        render_argument(
+            &arg,
+            "prod",
+            &BTreeMap::new(),
+            &mut ports,
+            &variables,
+            &mut volumes,
+            &mut volume_mounts,
+        )?;
+    }
+
+    assert_eq!(volumes.len(), 1);
+    assert_eq!(projected_sources(&volumes[0]).len(), 1);
+    Ok(())
+}
+
+/// A bundle is a file, so a string variable cannot read one.
+#[test]
+fn test_render_argument_string_variable_rejects_a_cluster_trust_bundle() {
+    use crate::config_image::StringVariable;
+    use crate::sisyphus_yaml::ClusterTrustBundleRef;
+
+    let arg = ArgumentValues::Uniform(Argument::StringVariable(StringVariable {
+        name: "trust-anchors".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "trust-anchors".to_string(),
+        VariableSource::ClusterTrustBundleRef(ClusterTrustBundleRef {
+            label_selector: None,
+            name: Some("escalante.bio-root".to_string()),
+            signer_name: None,
+        }),
+    )]);
+    let mut ports = BTreeMap::new();
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+
+    let error = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut ports,
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )
+    .expect_err("Expected a string variable to reject a bundle");
+    assert!(
+        error.to_string().contains("is a file and not a string"),
+        "unexpected error: {}",
+        error
+    );
+}
+
+#[test]
+fn test_render_argument_cluster_trust_bundle_by_signer() -> Result<()> {
+    use crate::sisyphus_yaml::ClusterTrustBundleRef;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+
+    let selector = LabelSelector {
+        match_labels: Some(BTreeMap::from([(
+            "escalante.bio/trust".to_string(),
+            "root".to_string(),
+        )])),
+        ..Default::default()
+    };
+    let (volumes, _) = render_file_variable_from(VariableSource::ClusterTrustBundleRef(
+        ClusterTrustBundleRef {
+            label_selector: Some(selector.clone()),
+            name: None,
+            signer_name: Some("escalante.bio/workload".to_string()),
+        },
+    ))?;
+
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    let bundle = sources[0]
+        .cluster_trust_bundle
+        .as_ref()
+        .expect("Expected a cluster trust bundle source");
+    assert_eq!(bundle.name, None);
+    assert_eq!(
+        bundle.signer_name.as_deref(),
+        Some("escalante.bio/workload")
+    );
+    assert_eq!(bundle.label_selector, Some(selector));
+    assert_eq!(bundle.path, "file.pem");
+    Ok(())
+}
+
+#[test]
+fn test_render_argument_cluster_trust_bundle_refuses_bad_refs() {
+    use crate::sisyphus_yaml::ClusterTrustBundleRef;
+    use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
+
+    for (bundle, expected) in [
+        (
+            ClusterTrustBundleRef {
+                label_selector: None,
+                name: None,
+                signer_name: Some("escalante.bio/workload".to_string()),
+            },
+            "needs a labelSelector",
+        ),
+        (
+            ClusterTrustBundleRef {
+                label_selector: Some(LabelSelector::default()),
+                name: Some("escalante.bio-root".to_string()),
+                signer_name: Some("escalante.bio/workload".to_string()),
+            },
+            "may not also set signerName or labelSelector",
+        ),
+        (
+            ClusterTrustBundleRef {
+                label_selector: None,
+                name: None,
+                signer_name: None,
+            },
+            "needs a name or a signerName",
+        ),
+    ] {
+        let error = render_file_variable_from(VariableSource::ClusterTrustBundleRef(bundle))
+            .expect_err("Expected the ref to be refused");
+        assert!(
+            error.to_string().contains(expected),
+            "unexpected error: {}",
+            error
+        );
+    }
+}
+
+#[test]
+fn test_render_argument_file_variable_from_pod_certificate() -> Result<()> {
+    use crate::sisyphus_yaml::PodCertificate;
+
+    let (volumes, volume_mounts) =
+        render_file_variable_from(VariableSource::PodCertificate(PodCertificate {
+            key_type: "ECDSAP256".to_string(),
+            max_expiration_seconds: Some(86400),
+            signer_name: "escalante.bio/workload".to_string(),
+        }))?;
+
+    assert_eq!(volumes.len(), 1);
+    let sources = projected_sources(&volumes[0]);
+    assert_eq!(sources.len(), 1);
+    let certificate = sources[0]
+        .pod_certificate
+        .as_ref()
+        .expect("Expected a pod certificate source");
+    assert_eq!(
+        certificate.credential_bundle_path.as_deref(),
+        Some("file.pem")
+    );
+    assert_eq!(certificate.certificate_chain_path, None);
+    assert_eq!(certificate.key_path, None);
+    assert_eq!(certificate.key_type, "ECDSAP256");
+    assert_eq!(certificate.max_expiration_seconds, Some(86400));
+    assert_eq!(certificate.signer_name, "escalante.bio/workload");
+    assert_eq!(volume_mounts[0].mount_path, "/etc/escalante");
+    Ok(())
+}
+
+/// A pod certificate is a file, so a string variable cannot read one.
+#[test]
+fn test_render_argument_string_variable_rejects_a_pod_certificate() {
+    use crate::config_image::StringVariable;
+    use crate::sisyphus_yaml::PodCertificate;
+
+    let arg = ArgumentValues::Uniform(Argument::StringVariable(StringVariable {
+        name: "file".to_string(),
+    }));
+    let variables = BTreeMap::from([(
+        "file".to_string(),
+        VariableSource::PodCertificate(PodCertificate {
+            key_type: "ECDSAP256".to_string(),
+            max_expiration_seconds: None,
+            signer_name: "escalante.bio/workload".to_string(),
+        }),
+    )]);
+
+    let error = render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut BTreeMap::new(),
+        &variables,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .expect_err("Expected a string variable to reject a pod certificate");
+    assert!(
+        error.to_string().contains("is a file and not a string"),
+        "unexpected error: {}",
+        error
+    );
+}
+
+/// Renders a file variable at /etc/escalante/file.pem that reads `source`.
+fn render_file_variable_from(source: VariableSource) -> Result<(Vec<Volume>, Vec<VolumeMount>)> {
+    use crate::config_image::FileVariable;
+
+    let arg = ArgumentValues::Uniform(Argument::FileVariable(FileVariable {
+        name: "file".to_string(),
+        path: "/etc/escalante/file.pem".to_string(),
+    }));
+    let variables = BTreeMap::from([("file".to_string(), source)]);
+    let mut volumes = Vec::new();
+    let mut volume_mounts = Vec::new();
+    render_argument(
+        &arg,
+        "prod",
+        &BTreeMap::new(),
+        &mut BTreeMap::new(),
+        &variables,
+        &mut volumes,
+        &mut volume_mounts,
+    )?;
+    Ok((volumes, volume_mounts))
+}
+
+#[test]
 fn test_deployment_labels_and_annotations_propagate_to_pods() {
     let labels = BTreeMap::from([
         ("app".to_string(), "my-app".to_string()),

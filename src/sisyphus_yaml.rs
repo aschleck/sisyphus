@@ -1,3 +1,4 @@
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::LabelSelector;
 use kube::api::DynamicObject;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -165,8 +166,20 @@ pub struct ServicePort {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum VariableSource {
+    ClusterTrustBundleRef(ClusterTrustBundleRef),
     ConfigMapKeyRef(KubernetesKeyRef),
+    PodCertificate(PodCertificate),
     SecretKeyRef(KubernetesKeyRef),
+}
+
+/// A cluster trust bundle carries one blob of trust anchors, so a reference to one names no key. It
+/// names either one bundle, or a signer and a selector of the signer's bundles.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ClusterTrustBundleRef {
+    pub label_selector: Option<LabelSelector>,
+    pub name: Option<String>,
+    pub signer_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -174,4 +187,14 @@ pub enum VariableSource {
 pub struct KubernetesKeyRef {
     pub key: String,
     pub name: String,
+}
+
+/// A key that kubelet generates for the pod, and the certificate chain that the signer issues for
+/// it, in one file.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct PodCertificate {
+    pub key_type: String,
+    pub max_expiration_seconds: Option<i32>,
+    pub signer_name: String,
 }

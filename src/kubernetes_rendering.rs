@@ -5,7 +5,9 @@ use crate::{
     },
     kubernetes_io::KubernetesKey,
     registry_clients::RegistryClients,
-    sisyphus_yaml::{DeploymentServiceConfig, SisyphusResource, VariableSource},
+    sisyphus_yaml::{
+        ClusterTrustBundleRef, DeploymentServiceConfig, SisyphusResource, VariableSource,
+    },
 };
 use anyhow::{anyhow, bail, Result};
 use docker_registry::render as containerRender;
@@ -15,8 +17,9 @@ use k8s_openapi::{
         apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
         batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
-            ConfigMapKeySelector, ConfigMapProjection, Container, ContainerPort, EnvVar,
-            EnvVarSource, HTTPGetAction, KeyToPath, PodSecurityContext, PodSpec, PodTemplateSpec,
+            ClusterTrustBundleProjection, ConfigMapKeySelector, ConfigMapProjection, Container,
+            ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, KeyToPath,
+            PodCertificateProjection, PodSecurityContext, PodSpec, PodTemplateSpec,
             Probe as KubeProbe, ProjectedVolumeSource, ResourceRequirements, SecretKeySelector,
             SecretProjection, Service, ServicePort, ServiceSpec, Volume, VolumeMount,
             VolumeProjection,
@@ -742,12 +745,25 @@ fn render_argument(
                 .get(&v.name)
                 .ok_or_else(|| anyhow!("Variable {} isn't set", v.name))?;
             match variable {
+                VariableSource::ClusterTrustBundleRef(_) => {
+                    bail!(
+                        "Variable {} reads a cluster trust bundle, which is a file and not a \
+                         string",
+                        v.name,
+                    );
+                }
                 VariableSource::ConfigMapKeyRef(v) => {
                     source.config_map_key_ref = Some(ConfigMapKeySelector {
                         name: v.name.clone(),
                         key: v.key.clone(),
                         optional: None,
                     });
+                }
+                VariableSource::PodCertificate(_) => {
+                    bail!(
+                        "Variable {} reads a pod certificate, which is a file and not a string",
+                        v.name,
+                    );
                 }
                 VariableSource::SecretKeyRef(v) => {
                     source.secret_key_ref = Some(SecretKeySelector {
@@ -812,15 +828,43 @@ fn render_file_variable(
         .and_then(|volume| volume.projected.as_mut())
         .and_then(|projected| projected.sources.as_mut())
         .ok_or_else(|| anyhow!("Volume {} holds no projected sources", volume_name))?;
-    project_file(sources, source, filename);
+    project_file(sources, source, filename)?;
 
     Ok(RenderedArgument::String(variable.path.clone()))
 }
 
-/// Adds one file of a config map or a secret to a projected volume. Each config map and each
-/// secret gets one source of the volume, and that source lists each file the config reads from it.
-fn project_file(sources: &mut Vec<VolumeProjection>, source: &VariableSource, filename: String) {
+/// Adds one file of a variable's source to a projected volume. Each config map and each secret
+/// gets one source of the volume, and that source lists each file the config reads from it.
+fn project_file(
+    sources: &mut Vec<VolumeProjection>,
+    source: &VariableSource,
+    filename: String,
+) -> Result<()> {
     let (source_name, source_key) = match source {
+        // A bundle and a pod certificate each project as one blob under one path, so each file
+        // takes a source of its own instead of sharing one the way keys of a config map do.
+        VariableSource::ClusterTrustBundleRef(bundle) => {
+            let mut projection = VolumeProjection::default();
+            projection.cluster_trust_bundle = Some(project_cluster_trust_bundle(bundle, filename)?);
+            if !sources.contains(&projection) {
+                sources.push(projection);
+            }
+            return Ok(());
+        }
+        VariableSource::PodCertificate(certificate) => {
+            let mut projection = VolumeProjection::default();
+            projection.pod_certificate = Some(PodCertificateProjection {
+                credential_bundle_path: Some(filename),
+                key_type: certificate.key_type.clone(),
+                max_expiration_seconds: certificate.max_expiration_seconds,
+                signer_name: certificate.signer_name.clone(),
+                ..Default::default()
+            });
+            if !sources.contains(&projection) {
+                sources.push(projection);
+            }
+            return Ok(());
+        }
         VariableSource::ConfigMapKeyRef(r) | VariableSource::SecretKeyRef(r) => (&r.name, &r.key),
     };
     let existing = sources
@@ -835,6 +879,9 @@ fn project_file(sources: &mut Vec<VolumeProjection>, source: &VariableSource, fi
     };
 
     let items = match source {
+        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
+            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        }
         VariableSource::ConfigMapKeyRef(_) => sources[index]
             .config_map
             .as_mut()
@@ -857,6 +904,38 @@ fn project_file(sources: &mut Vec<VolumeProjection>, source: &VariableSource, fi
     if !items.contains(&item) {
         items.push(item);
     }
+    Ok(())
+}
+
+/// Projects a bundle that the ref names, or the bundles of a signer that its selector matches.
+fn project_cluster_trust_bundle(
+    bundle: &ClusterTrustBundleRef,
+    path: String,
+) -> Result<ClusterTrustBundleProjection> {
+    match (&bundle.name, &bundle.signer_name, &bundle.label_selector) {
+        (Some(name), None, None) => Ok(ClusterTrustBundleProjection {
+            name: Some(name.clone()),
+            path,
+            ..Default::default()
+        }),
+        (None, Some(signer_name), Some(label_selector)) => Ok(ClusterTrustBundleProjection {
+            label_selector: Some(label_selector.clone()),
+            path,
+            signer_name: Some(signer_name.clone()),
+            ..Default::default()
+        }),
+        // Kubelet reads a missing selector as one that matches no bundle.
+        (None, Some(signer_name), None) => bail!(
+            "The cluster trust bundle ref for signer {} needs a labelSelector, and `{{}}` matches \
+             each of the signer's bundles",
+            signer_name
+        ),
+        (Some(name), _, _) => bail!(
+            "The cluster trust bundle ref for {} may not also set signerName or labelSelector",
+            name
+        ),
+        (None, None, _) => bail!("A cluster trust bundle ref needs a name or a signerName"),
+    }
 }
 
 /// The name of the config map or the secret that the projection reads, when it reads the kind of
@@ -866,6 +945,9 @@ fn projection_name<'a>(
     source: &VariableSource,
 ) -> Option<&'a str> {
     match source {
+        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
+            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        }
         VariableSource::ConfigMapKeyRef(_) => {
             projection.config_map.as_ref().map(|c| c.name.as_str())
         }
@@ -876,6 +958,9 @@ fn projection_name<'a>(
 fn build_projection(source: &VariableSource, source_name: &str) -> VolumeProjection {
     let mut projection = VolumeProjection::default();
     match source {
+        VariableSource::ClusterTrustBundleRef(_) | VariableSource::PodCertificate(_) => {
+            unreachable!("project_file gives bundles and pod certificates sources of their own")
+        }
         VariableSource::ConfigMapKeyRef(_) => {
             projection.config_map = Some(ConfigMapProjection {
                 items: Some(Vec::new()),
