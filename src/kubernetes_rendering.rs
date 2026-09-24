@@ -604,7 +604,7 @@ fn process_cronjob_footprint(
 
         let serialized = serde_yaml::to_string(&CronJob {
             metadata: cronjob_metadata.clone(),
-            spec: Some(cronjob_spec),
+            spec: cronjob_spec,
             status: None,
         })?;
         let converted =

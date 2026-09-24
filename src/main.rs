@@ -45,7 +45,6 @@ use indicatif::{ProgressBar, ProgressStyle};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
     api::{DynamicObject, ObjectMeta, Patch, PatchParams},
-    core::ErrorResponse,
     Error, ResourceExt,
 };
 use serde::Deserialize;
@@ -1050,7 +1049,7 @@ async fn get_objects_from_kubernetes(
                 Ok(o) => {
                     destination.insert(key.clone(), o);
                 }
-                Err(Error::Api(ErrorResponse { code: 404, .. })) => { /* deletions are fine */ }
+                Err(Error::Api(status)) if status.is_not_found() => { /* deletions are fine */ }
                 Err(e) => bail!("Unable to fetch item, caused by: {:?}", e),
             };
             bar.inc(1);
