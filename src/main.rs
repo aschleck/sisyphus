@@ -10,6 +10,7 @@ mod object_policy;
 mod output;
 mod plan;
 mod registry_clients;
+mod sisyphus_files;
 mod sisyphus_yaml;
 mod starlark;
 
@@ -36,7 +37,8 @@ use crate::{
     },
     plan::{check_plan_is_current, read_plan, write_plan},
     registry_clients::{resolve_image_tag, RegistryClients},
-    sisyphus_yaml::{HasConfigImage, HasKind, SisyphusResource},
+    sisyphus_files::{get_sisyphus_resources_from_files, SisyphusKey},
+    sisyphus_yaml::{HasConfigImage, SisyphusResource},
 };
 use anyhow::{anyhow, bail, Context, Result};
 use clap::{Args, Parser, Subcommand};
@@ -45,13 +47,11 @@ use indicatif::{ProgressBar, ProgressStyle};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{
     api::{DynamicObject, ObjectMeta, Patch, PatchParams},
-    Error, ResourceExt,
+    Error,
 };
-use serde::Deserialize;
 use sqlx::{any::AnyPoolOptions, AnyPool, Row};
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
 };
@@ -914,19 +914,6 @@ fn report_changes(changed: &[ResourceDiff]) {
     }
 }
 
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
-struct SisyphusKey {
-    pub api_version: String,
-    pub kind: String,
-    pub name: String,
-}
-
-#[derive(Debug)]
-struct SisyphusResources {
-    by_namespace_by_key: HashMap<String, HashMap<SisyphusKey, SisyphusResource>>,
-    global_by_key: HashMap<SisyphusKey, SisyphusResource>,
-}
-
 async fn apply_refresh(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()> {
     refresh_group(changed, &pool).await?;
     Ok(())
@@ -1057,146 +1044,6 @@ async fn get_objects_from_kubernetes(
     }
     bar.finish();
     Ok(resources)
-}
-
-fn get_sisyphus_resources_from_files(directory: &Path) -> Result<SisyphusResources> {
-    let mut resources = SisyphusResources {
-        by_namespace_by_key: HashMap::new(),
-        global_by_key: HashMap::new(),
-    };
-    for entry in fs::read_dir(directory)? {
-        let path = entry?.path();
-        if path.is_dir() {
-            let (resources, allow_any_namespace, namespace) =
-                match path.file_name().map(|s| s.to_str()).flatten() {
-                    Some("global") => (&mut resources.global_by_key, true, None),
-                    Some(namespace) => (
-                        resources
-                            .by_namespace_by_key
-                            .entry(namespace.to_string())
-                            .or_insert_with(|| HashMap::new()),
-                        false,
-                        Some(namespace.to_string()),
-                    ),
-                    None => bail!("Path has no filename"),
-                };
-            get_objects_from_namespace(&path, resources, allow_any_namespace, &namespace)?;
-        }
-    }
-    Ok(resources)
-}
-
-fn get_objects_from_namespace(
-    directory: &Path,
-    resources: &mut HashMap<SisyphusKey, SisyphusResource>,
-    allow_any_namespace: bool,
-    namespace: &Option<String>,
-) -> Result<()> {
-    let index_path = directory.join("index.yaml");
-    if !index_path.exists() {
-        return Ok(());
-    }
-    get_objects_from_file(&index_path, resources, allow_any_namespace, &namespace)
-}
-
-fn get_objects_from_file(
-    path: &Path,
-    resources: &mut HashMap<SisyphusKey, SisyphusResource>,
-    allow_any_namespace: bool,
-    namespace: &Option<String>,
-) -> Result<()> {
-    let directory = path
-        .parent()
-        .ok_or_else(|| anyhow!("Expected to be in a child folder"))?;
-    let reader = File::open(&path)?;
-    for document in serde_yaml::Deserializer::from_reader(&reader) {
-        let mut object: SisyphusResource = SisyphusResource::deserialize(document)
-            .with_context(|| format!("in file {:?}", path))?;
-
-        if let SisyphusResource::KubernetesYaml(v) = &mut object {
-            let mut extra_objects = Vec::new();
-            for source_path in &v.sources {
-                load_objects_from_kubernetes_yaml(&directory.join(source_path), &mut extra_objects)
-                    .with_context(|| {
-                        format!("reading file {:?} referenced by {:?}", source_path, path)
-                    })?;
-            }
-            v.sources.clear();
-            v.objects.append(&mut extra_objects);
-
-            for object in &mut v.objects {
-                if let Some(namespace) = object.metadata.namespace.as_ref() {
-                    if !allow_any_namespace {
-                        let types = object
-                            .types
-                            .as_ref()
-                            .map(|t| format!("{}/{}", t.api_version, t.kind))
-                            .unwrap_or_else(|| "unknown".to_string());
-                        bail!(
-                            "{}/{} referenced by {} in {:?} should not specify namespace {:?}",
-                            types,
-                            object.name_any(),
-                            v.metadata.name,
-                            path,
-                            namespace
-                        );
-                    }
-                } else {
-                    object.metadata.namespace = namespace.clone();
-                }
-            }
-            insert_sisyphus_resource(object, resources)?;
-        } else if let SisyphusResource::SisyphusYaml(v) = &mut object {
-            for source_path in &v.sources {
-                get_objects_from_file(
-                    &directory.join(source_path),
-                    resources,
-                    allow_any_namespace,
-                    namespace,
-                )?;
-            }
-        } else {
-            insert_sisyphus_resource(object, resources)?;
-        }
-    }
-
-    Ok(())
-}
-
-fn load_objects_from_kubernetes_yaml(path: &Path, into: &mut Vec<DynamicObject>) -> Result<()> {
-    let reader = File::open(&path)?;
-    for document in serde_yaml::Deserializer::from_reader(&reader) {
-        let object: DynamicObject = DynamicObject::deserialize(document)?;
-        if object.types.is_none() && object.metadata == ObjectMeta::default() {
-            // kubectl tolerates these, so we do too
-            continue;
-        }
-        into.push(object);
-    }
-
-    Ok(())
-}
-
-fn insert_sisyphus_resource(
-    object: SisyphusResource,
-    resources: &mut HashMap<SisyphusKey, SisyphusResource>,
-) -> Result<()> {
-    let (api_version, kind, name) = match &object {
-        SisyphusResource::KubernetesYaml(v) => (&v.api_version, v.kind(), &v.metadata.name),
-        SisyphusResource::SisyphusCronJob(v) => (&v.api_version, v.kind(), &v.metadata.name),
-        SisyphusResource::SisyphusDeployment(v) => (&v.api_version, v.kind(), &v.metadata.name),
-        SisyphusResource::SisyphusYaml(_) => unreachable!("These should already have been loaded"),
-    };
-    let key = SisyphusKey {
-        api_version: api_version.clone(),
-        kind: kind.to_string(),
-        name: name.clone(),
-    };
-    if resources.contains_key(&key) {
-        bail!("Key {:?} already exists", key);
-    }
-    resources.insert(key, object);
-    Ok(())
 }
 
 async fn render_sisyphus_resources(

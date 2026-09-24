@@ -224,6 +224,43 @@ footprint:
 Both objects accept an optional `serviceAccount` in `config`. An app that names no service account
 runs as `default`.
 
+### Including files with `SisyphusYaml`
+
+For organization, an `index.yaml` file can include adjacent files with `SisyphusYaml`. These files
+can hold anything an `index.yaml` can.
+
+````yaml
+# filepath: example/production/echo/index.yaml
+
+apiVersion: sisyphus/v1
+kind: SisyphusYaml
+metadata:
+  name: and-even-more-sisyphus-yaml-files
+sources:
+  - ingress.yaml # this file can itself contain SisyphusYaml
+````
+
+### Defining scoped variables
+
+A `SisyphusYaml` object can set `variables` too. Each `Deployment` and `CronJob` in the files it
+lists gets those variables as defaults if they don't define them themselves. For global variables,
+you can put a `variables.yaml` in the `--monitor-directory`, beside the namespace directories, to
+set default variables for every object.
+
+````yaml
+# filepath: example/production/variables.yaml
+
+apiVersion: sisyphus/v1
+variables:
+  trust-anchors:
+    clusterTrustBundleRef:
+      name: acme-root
+````
+
+When more than one place sets a variable, the closest one wins: the object's own `variables`,
+then the `SisyphusYaml` that lists it, then each `SisyphusYaml` above that, and last
+`variables.yaml`. An object that doesn't read a variable ignores it.
+
 ### Deploying with `KubernetesYaml`
 
 ````yaml

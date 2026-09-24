@@ -98,12 +98,25 @@ pub struct SisyphusYaml {
     pub metadata: Metadata,
     #[serde(default)]
     pub sources: Vec<String>,
+    #[serde(default)]
+    pub variables: BTreeMap<String, VariableSource>,
 }
 
 impl HasKind for SisyphusYaml {
     fn kind(&self) -> &'static str {
         "SisyphusYaml"
     }
+}
+
+/// The variables that every directory inherits, from the `variables.yaml` beside the directories.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct VariablesYaml {
+    pub api_version: String,
+    // The other objects read sources such as `secretKeyRef:` as maps because serde buffers them for
+    // `kind`, but serde_yaml reads an enum from a file directly as a `!tag` unless told otherwise.
+    #[serde(default, with = "serde_yaml::with::singleton_map_recursive")]
+    pub variables: BTreeMap<String, VariableSource>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
