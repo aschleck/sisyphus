@@ -8,7 +8,7 @@ bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "rules_multirun", version = "0.13.0")
 bazel_dep(name = "rules_oci", version = "2.2.6")
-bazel_dep(name = "rules_rust", version = "0.67.0")
+bazel_dep(name = "rules_rust", version = "0.74.0")
 bazel_dep(name = "tar.bzl", version = "0.6.0")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
@@ -22,10 +22,11 @@ register_toolchains(
     "@rust_toolchains//:all",
 )
 
-crate = use_extension("@rules_rust//crate_universe:extension.bzl", "crate")
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "crates",
     cargo_lockfile = "//:Cargo.lock",
+    lockfile = "//:cargo-bazel-lock.json",
     manifests = ["//:Cargo.toml"],
 )
 use_repo(crate, "crates")
