@@ -23,8 +23,8 @@ use crate::{
     },
     generate_diff::{drop_noop_patches, generate_diff, DiffAction, ResourceDiff},
     kubernetes_io::{
-        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
-        KubernetesResources, MANAGER,
+        get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets,
+        KubernetesClients, KubernetesKey, KubernetesResources, MANAGER,
     },
     kubernetes_rendering::render_sisyphus_resource,
     object_policy::{
@@ -337,7 +337,7 @@ async fn run(command: Commands) -> Result<std::process::ExitCode> {
         } => {
             let pool = connect(&database).await?;
             let pauses = load_pauses(&pool).await?;
-            let (changed, _) = diff(
+            let (changed, _, _) = diff(
                 &filter,
                 &monitor_directory,
                 Scope::Everything(&pauses),
@@ -366,7 +366,7 @@ async fn run(command: Commands) -> Result<std::process::ExitCode> {
         } => {
             let pool = connect(&database).await?;
             let pauses = load_pauses(&pool).await?;
-            let (changed, from_database) = diff(
+            let (changed, from_database, _) = diff(
                 &filter,
                 &monitor_directory,
                 Scope::Everything(&pauses),
@@ -645,13 +645,14 @@ enum Scope<'a> {
 ///
 /// The second value is the database side of the comparison, as the database holds it and before
 /// `make_comparable` normalizes it. `plan` keeps it, and then `push --plan` can tell whether the
-/// state that a change describes is still there.
+/// state that a change describes is still there. The third value connects to the clusters of the
+/// changes, so that a push does not discover their types again.
 async fn diff(
     filter: &PartialKey,
     monitor_directory: &str,
     scope: Scope<'_>,
     pool: &AnyPool,
-) -> Result<(Vec<ResourceDiff>, KubernetesResources)> {
+) -> Result<(Vec<ResourceDiff>, KubernetesResources, KubernetesClients)> {
     let mut registries = RegistryClients::new();
     let mut from_files = KubernetesResources {
         by_key: BTreeMap::new(),
@@ -787,7 +788,7 @@ async fn diff(
     let changed = generate_diff(comparable_database, comparable_files)?;
     let clients = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
     let changed = drop_noop_patches(changed, &clients).await?;
-    Ok((changed, from_database))
+    Ok((changed, from_database, clients))
 }
 
 async fn push(
@@ -799,7 +800,8 @@ async fn push(
     // Read the pauses one time here, and not for each object during the render. Then the render
     // code does not use the database.
     let pauses = load_pauses(pool).await?;
-    let (changed, _) = diff(filter, monitor_directory, Scope::Everything(&pauses), pool).await?;
+    let (changed, _, clients) =
+        diff(filter, monitor_directory, Scope::Everything(&pauses), pool).await?;
     report_changes(&changed);
     if changed.is_empty() {
         return Ok(());
@@ -807,7 +809,7 @@ async fn push(
     if !ask_for_user_permission("pushing", yes)? {
         return Ok(());
     }
-    apply_diff(changed, &pool).await?;
+    apply_diff(changed, &clients, &pool).await?;
     Ok(())
 }
 
@@ -823,7 +825,8 @@ async fn apply_plan(path: &Path, yes: bool, pool: &AnyPool) -> Result<()> {
     if !ask_for_user_permission("pushing", yes)? {
         return Ok(());
     }
-    apply_diff(changed, &pool).await?;
+    let clients = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
+    apply_diff(changed, &clients, &pool).await?;
     Ok(())
 }
 
@@ -839,7 +842,7 @@ async fn push_one_object(
     yes: bool,
     pool: &AnyPool,
 ) -> Result<()> {
-    let (changed, _) = diff(
+    let (changed, _, clients) = diff(
         &PartialKey::default(),
         monitor_directory,
         Scope::OneObject { image, reference },
@@ -853,7 +856,7 @@ async fn push_one_object(
     if !ask_for_user_permission("pushing", yes)? {
         return Ok(());
     }
-    apply_diff(changed, &pool).await?;
+    apply_diff(changed, &clients, &pool).await?;
     Ok(())
 }
 
