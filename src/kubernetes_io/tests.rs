@@ -199,6 +199,20 @@ fn test_copy_unmanaged_fields_array_with_selectors() -> Result<()> {
 }
 
 #[test]
+fn test_copy_unmanaged_fields_array_with_value_selectors() -> Result<()> {
+    let have = json!(["a.example.com", "b.example.com"]);
+    let want = json!(["a.example.com", "c.example.com"]);
+    let managed = json!({
+        r#"v:"a.example.com""#: {},
+        r#"v:"b.example.com""#: {}
+    });
+
+    let merged = copy_unmanaged_fields(&have, &want, &managed)?;
+    assert_eq!(merged, json!(["a.example.com", "c.example.com"]));
+    Ok(())
+}
+
+#[test]
 fn test_copy_unmanaged_fields_array_with_selectors_preserve_unmanaged() -> Result<()> {
     let have = json!([
         {"name": "item1", "value": "old1", "extra": "keep"}

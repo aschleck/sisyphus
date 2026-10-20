@@ -48,8 +48,25 @@ pub(crate) const MANAGER: &str = "sisyphus";
 
 struct Selector<'a> {
     data: &'a JsonValue,
-    matcher: serde_json::Map<String, JsonValue>,
+    matcher: Matcher,
     used: bool,
+}
+
+// How managedFields names an item in a list
+enum Matcher {
+    // `k:{...}` names an object by the values of its key fields
+    Keys(serde_json::Map<String, JsonValue>),
+    // `v:...` names a scalar by its value
+    Value(JsonValue),
+}
+
+impl Matcher {
+    fn matches(&self, item: &JsonValue) -> bool {
+        match self {
+            Matcher::Keys(keys) => keys.iter().all(|(k, v)| item.get(k) == Some(v)),
+            Matcher::Value(value) => item == value,
+        }
+    }
 }
 
 fn copy_unmanaged_fields(
@@ -72,12 +89,14 @@ fn copy_unmanaged_fields(
                         bail!("Unknown selector {}", k);
                     }
                 };
-                if t != "k" {
-                    bail!("Unknown type of selector {}", t);
-                }
+                let matcher = match t {
+                    "k" => Matcher::Keys(serde_json::from_str(s)?),
+                    "v" => Matcher::Value(serde_json::from_str(s)?),
+                    _ => bail!("Unknown type of selector {}", t),
+                };
                 selectors.push(Selector {
                     data: v,
-                    matcher: serde_json::from_str::<serde_json::Map<String, JsonValue>>(s)?,
+                    matcher,
                     used: false,
                 });
             }
@@ -93,15 +112,7 @@ fn copy_unmanaged_fields(
                     if selector.used {
                         return None;
                     }
-                    let mut matches = true;
-                    for (k, v) in &selector.matcher {
-                        if wv.get(k) != Some(v) {
-                            matches = false;
-                            break;
-                        }
-                    }
-
-                    if matches {
+                    if selector.matcher.matches(wv) {
                         selector.used = true;
                         return Some(selector);
                     } else {
@@ -114,18 +125,7 @@ fn copy_unmanaged_fields(
                     Some(ref mvv) => {
                         let mut found = None;
                         for j in 0..unused.len() {
-                            let matches = {
-                                let hv = &unused[j];
-                                let mut matches = true;
-                                for (k, v) in &mvv.matcher {
-                                    if hv.get(k) != Some(&v) {
-                                        matches = false;
-                                        break;
-                                    }
-                                }
-                                matches
-                            };
-                            if matches {
+                            if mvv.matcher.matches(&unused[j]) {
                                 found = Some(unused.remove(j));
                                 break;
                             }
