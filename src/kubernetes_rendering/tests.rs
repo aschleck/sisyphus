@@ -42,7 +42,7 @@ fn test_process_cronjob_footprint() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -105,7 +105,7 @@ fn test_cronjob_spec_structure() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -174,7 +174,7 @@ fn test_cronjob_concurrency_policy() -> Result<()> {
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -231,7 +231,7 @@ fn test_cronjob_config_image_annotation_stays_off_the_templates() -> Result<()> 
 
     let mut container = Container::default();
     container.name = "test-cronjob".to_string();
-    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
     process_cronjob_footprint(
@@ -563,16 +563,6 @@ fn test_build_base_deployment_spec() {
     // Verify the selector is the (smaller) selector set, not the full label set
     assert_eq!(spec.selector.match_labels, Some(selector));
 
-    // Verify defaults
-    assert_eq!(spec.progress_deadline_seconds, Some(600));
-    assert_eq!(spec.revision_history_limit, Some(10));
-
-    // Verify strategy
-    assert!(spec.strategy.is_some());
-    let strategy = spec.strategy.unwrap();
-    assert_eq!(strategy.type_, Some("RollingUpdate".to_string()));
-    assert!(strategy.rolling_update.is_some());
-
     // Verify template metadata
     let Some(template_metadata) = spec.template.metadata else {
         panic!("Expected metadata")
@@ -590,7 +580,7 @@ fn test_build_pod_spec() {
     volume.name = "test-volume".to_string();
     let volumes = vec![volume.clone()];
 
-    let pod_spec = build_pod_spec(container.clone(), "Always", &None, volumes.clone());
+    let pod_spec = build_pod_spec(container.clone(), &None, volumes.clone());
 
     // Verify container
     assert_eq!(pod_spec.containers.len(), 1);
@@ -598,16 +588,6 @@ fn test_build_pod_spec() {
 
     // Verify volumes
     assert_eq!(pod_spec.volumes, Some(volumes));
-
-    // Verify defaults
-    assert_eq!(pod_spec.dns_policy, Some("ClusterFirst".to_string()));
-    assert_eq!(pod_spec.restart_policy, Some("Always".to_string()));
-    assert_eq!(
-        pod_spec.scheduler_name,
-        Some("default-scheduler".to_string())
-    );
-    assert!(pod_spec.security_context.is_some());
-    assert_eq!(pod_spec.termination_grace_period_seconds, Some(30));
 }
 
 #[test]
@@ -615,7 +595,7 @@ fn test_build_pod_spec_empty_volumes() {
     let mut container = Container::default();
     container.name = "test-container".to_string();
 
-    let pod_spec = build_pod_spec(container, "Always", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
     assert_eq!(pod_spec.volumes, None);
 }
 
@@ -1006,7 +986,7 @@ fn test_render_argument_file_variable_from_config_map() -> Result<()> {
 
     assert_eq!(volumes.len(), 1);
     assert_eq!(volumes[0].name, "root-ca");
-    assert_eq!(default_mode(&volumes[0]), Some(420));
+    assert_eq!(default_mode(&volumes[0]), None);
     let sources = projected_sources(&volumes[0]);
     assert_eq!(sources.len(), 1);
     assert!(sources[0].secret.is_none());
@@ -1128,7 +1108,7 @@ fn test_render_argument_file_variable_from_secret() -> Result<()> {
 
     assert_eq!(volumes.len(), 1);
     assert_eq!(volumes[0].name, "tls");
-    assert_eq!(default_mode(&volumes[0]), Some(420));
+    assert_eq!(default_mode(&volumes[0]), None);
     let sources = projected_sources(&volumes[0]);
     assert_eq!(sources.len(), 1);
     assert!(sources[0].config_map.is_none());
@@ -1333,7 +1313,7 @@ fn test_render_argument_file_variable_from_cluster_trust_bundle() -> Result<()> 
 
     assert_eq!(volumes.len(), 1);
     assert_eq!(volumes[0].name, "trust-anchors");
-    assert_eq!(default_mode(&volumes[0]), Some(420));
+    assert_eq!(default_mode(&volumes[0]), None);
     let sources = projected_sources(&volumes[0]);
     assert_eq!(sources.len(), 1);
     assert!(sources[0].config_map.is_none());
@@ -1846,7 +1826,7 @@ fn test_cronjob_labels_and_annotations_propagate_to_jobs_and_pods() -> Result<()
     container.name = "test-cronjob".to_string();
     container.image = Some("test-image:latest".to_string());
 
-    let pod_spec = build_pod_spec(container, "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container, &None, Vec::new());
 
     let mut by_key = BTreeMap::new();
 
@@ -1992,7 +1972,6 @@ fn test_process_cronjob_footprint_keeps_the_service_account() -> Result<()> {
     container.name = "test-cronjob".to_string();
     let pod_spec = build_pod_spec(
         container,
-        "OnFailure",
         &cronjob.config.service_account,
         Vec::new(),
     );
@@ -2063,7 +2042,6 @@ fn test_process_deployment_footprint_keeps_the_service_account() -> Result<()> {
     container.name = "test-deployment".to_string();
     deployment_spec.template.spec = Some(build_pod_spec(
         container,
-        "Always",
         &deployment.config.service_account,
         Vec::new(),
     ));
@@ -2096,30 +2074,12 @@ fn test_build_pod_spec_service_account() {
     let mut container = Container::default();
     container.name = "test-container".to_string();
 
-    let pod_spec = build_pod_spec(container.clone(), "OnFailure", &None, Vec::new());
+    let pod_spec = build_pod_spec(container.clone(), &None, Vec::new());
     assert_eq!(pod_spec.service_account_name, None);
 
     let named = Some("data-puller".to_string());
-    let pod_spec = build_pod_spec(container, "OnFailure", &named, Vec::new());
+    let pod_spec = build_pod_spec(container, &named, Vec::new());
     assert_eq!(pod_spec.service_account_name, named);
-}
-
-#[test]
-fn test_build_pod_spec_restart_policy() {
-    let mut container = Container::default();
-    container.name = "test-container".to_string();
-
-    // Test with OnFailure (typical for Jobs/CronJobs)
-    let pod_spec = build_pod_spec(container.clone(), "OnFailure", &None, Vec::new());
-    assert_eq!(pod_spec.restart_policy, Some("OnFailure".to_string()));
-
-    // Test with Never (also valid for Jobs/CronJobs)
-    let pod_spec = build_pod_spec(container.clone(), "Never", &None, Vec::new());
-    assert_eq!(pod_spec.restart_policy, Some("Never".to_string()));
-
-    // Test with Always (typical for Deployments)
-    let pod_spec = build_pod_spec(container, "Always", &None, Vec::new());
-    assert_eq!(pod_spec.restart_policy, Some("Always".to_string()));
 }
 
 fn probe(path: &str, port: &str) -> Probe {
@@ -2183,23 +2143,17 @@ fn test_build_container_config_renders_probes() -> Result<()> {
 }
 
 #[test]
-fn test_build_container_config_probe_defaults_match_server() -> Result<()> {
-    // The server defaults these fields, so render them to keep pushes from diffing.
+fn test_build_container_config_probe_leaves_defaults_to_server() -> Result<()> {
     let app = app_with_metadata_port(Some(probe("/healthz", "metadata")), None);
     let (container, _, _) =
         build_container_config("dep", &test_index(), &app, "prod", &BTreeMap::new())?;
 
     let liveness = container.liveness_probe.expect("liveness probe");
-    assert_eq!(liveness.period_seconds, Some(10));
-    assert_eq!(liveness.timeout_seconds, Some(1));
-    assert_eq!(liveness.success_threshold, Some(1));
-    assert_eq!(liveness.failure_threshold, Some(3));
-    // The server omits a zero initial delay, so leave it unset.
-    assert_eq!(liveness.initial_delay_seconds, None);
-    assert_eq!(
-        liveness.http_get.expect("http get").scheme,
-        Some("HTTP".to_string())
-    );
+    assert_eq!(liveness.period_seconds, None);
+    assert_eq!(liveness.timeout_seconds, None);
+    assert_eq!(liveness.success_threshold, None);
+    assert_eq!(liveness.failure_threshold, None);
+    assert_eq!(liveness.http_get.expect("http get").scheme, None);
     Ok(())
 }
 

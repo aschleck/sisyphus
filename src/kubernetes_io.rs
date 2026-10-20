@@ -228,12 +228,15 @@ fn copy_unmanaged_fields(
     })
 }
 
-pub(crate) async fn get_kubernetes_clients(
-    keys: impl IntoIterator<Item = &KubernetesKey>,
-) -> Result<(
+/// A client for each cluster, and every type of object that those clusters serve
+pub(crate) type KubernetesClients = (
     HashMap<String, kube::Client>,
     HashMap<(String, String), (ApiResource, ApiCapabilities)>,
-)> {
+);
+
+pub(crate) async fn get_kubernetes_clients(
+    keys: impl IntoIterator<Item = &KubernetesKey>,
+) -> Result<KubernetesClients> {
     let mut clients = HashMap::new();
     for key in keys.into_iter() {
         let config = kube::Config::from_kubeconfig(&KubeConfigOptions {
@@ -272,8 +275,7 @@ pub(crate) async fn get_kubernetes_clients(
 
 pub(crate) fn get_kubernetes_api(
     key: &KubernetesKey,
-    clients: &HashMap<String, kube::Client>,
-    types: &HashMap<(String, String), (ApiResource, ApiCapabilities)>,
+    (clients, types): &KubernetesClients,
 ) -> Result<kube::Api<DynamicObject>> {
     let client = clients
         .get(&key.cluster)

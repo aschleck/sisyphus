@@ -21,7 +21,7 @@ use crate::{
     filter::{
         key_matches_filter, namespace_key_retained, required_namespace_identities, PartialKey,
     },
-    generate_diff::{generate_diff, DiffAction, ResourceDiff},
+    generate_diff::{drop_noop_patches, generate_diff, DiffAction, ResourceDiff},
     kubernetes_io::{
         get_kubernetes_api, get_kubernetes_clients, make_comparable, munge_secrets, KubernetesKey,
         KubernetesResources, MANAGER,
@@ -580,8 +580,8 @@ async fn import(key: KubernetesKey, yes: bool, pool: &AnyPool) -> Result<()> {
         bail!("Object {} already exists", key);
     }
 
-    let (clients, types) = get_kubernetes_clients([&key]).await?;
-    let api = get_kubernetes_api(&key, &clients, &types)?;
+    let clients = get_kubernetes_clients([&key]).await?;
+    let api = get_kubernetes_api(&key, &clients)?;
     if let (Some(_), None) = (&key.namespace, api.namespace()) {
         bail!("Resource type {} is cluster scoped", key.kind);
     }
@@ -597,8 +597,8 @@ async fn import(key: KubernetesKey, yes: bool, pool: &AnyPool) -> Result<()> {
     }
 
     object.metadata.managed_fields = None;
-    let (clients, types) = get_kubernetes_clients([&key]).await?;
-    let api = get_kubernetes_api(&key, &clients, &types)?;
+    let clients = get_kubernetes_clients([&key]).await?;
+    let api = get_kubernetes_api(&key, &clients)?;
     let result = api
         .patch(
             &key.name,
@@ -785,6 +785,8 @@ async fn diff(
     let (comparable_database, comparable_files) =
         make_comparable(from_database.clone(), from_files.clone())?;
     let changed = generate_diff(comparable_database, comparable_files)?;
+    let clients = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
+    let changed = drop_noop_patches(changed, &clients).await?;
     Ok((changed, from_database))
 }
 
@@ -1014,7 +1016,7 @@ async fn get_objects_from_kubernetes(
         by_key: BTreeMap::new(),
         namespaces: BTreeMap::new(),
     };
-    let (clients, types) = get_kubernetes_clients(
+    let clients = get_kubernetes_clients(
         from_database
             .by_key
             .keys()
@@ -1031,7 +1033,7 @@ async fn get_objects_from_kubernetes(
         (&from_database.namespaces, &mut resources.namespaces),
     ] {
         for key in source.keys() {
-            let api = get_kubernetes_api(key, &clients, &types)?;
+            let api = get_kubernetes_api(key, &clients)?;
             match api.get(&key.name).await {
                 Ok(o) => {
                     destination.insert(key.clone(), o);

@@ -15,7 +15,8 @@ use crate::{
 };
 
 pub(crate) async fn apply_diff(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Result<()> {
-    let (clients, types) = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
+    let clients = get_kubernetes_clients(changed.iter().map(|c| &c.key)).await?;
+    let (_, types) = &clients;
     // Check that we don't have any namespace vs resource scope mismatches
     for ResourceDiff { key, .. } in &changed {
         let Some((_, caps)) = types.get(&(key.api_version.clone(), key.kind.clone())) else {
@@ -34,7 +35,7 @@ pub(crate) async fn apply_diff(changed: Vec<ResourceDiff>, pool: &AnyPool) -> Re
     }
     let mut pending_deletions: Vec<(kube::Api<DynamicObject>, String)> = Vec::new();
     for ResourceDiff { action, key, .. } in changed {
-        let api = get_kubernetes_api(&key, &clients, &types)?;
+        let api = get_kubernetes_api(&key, &clients)?;
         let is_delete = matches!(action, DiffAction::Delete);
         let verb = past_tense(&action);
         apply_single_diff(action, &key, &api, pool).await?;

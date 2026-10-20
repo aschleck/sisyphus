@@ -1,11 +1,18 @@
-use crate::kubernetes_io::{KubernetesKey, KubernetesResources};
-use anyhow::{anyhow, bail, Result};
-use kube::api::{DynamicObject, TypeMeta};
+use crate::kubernetes_io::{
+    get_kubernetes_api, KubernetesClients, KubernetesKey, KubernetesResources, MANAGER,
+};
+use anyhow::{anyhow, bail, Context, Result};
+use futures::{stream, StreamExt, TryStreamExt};
+use kube::api::{DynamicObject, Patch, PatchParams, TypeMeta};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
 #[cfg(test)]
 mod tests;
+
+// How many patches to try on the server at the same time
+const DRY_RUN_CONCURRENCY: usize = 16;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub(crate) enum DiffAction {
@@ -63,6 +70,55 @@ pub(crate) fn generate_diff(
     }
 
     Ok(changed)
+}
+
+/// Asks the server whether each patch changes the object and drops the ones that do not. The server
+/// fills in defaults and rewrites values, so the diff shows changes that the server would undo.
+pub(crate) async fn drop_noop_patches(
+    changed: Vec<ResourceDiff>,
+    clients: &KubernetesClients,
+) -> Result<Vec<ResourceDiff>> {
+    let checks = changed
+        .into_iter()
+        .map(|diff| keep_if_patch_changes_object(diff, clients));
+    let checked: Vec<Option<ResourceDiff>> = stream::iter(checks)
+        .buffered(DRY_RUN_CONCURRENCY)
+        .try_collect()
+        .await?;
+    Ok(checked.into_iter().flatten().collect())
+}
+
+/// Gives back the diff unless it is a patch that leaves the object as it is. The diff it gives back
+/// compares the live object with what the server makes of the patch, so the server's own defaults
+/// and rewrites do not show as changes.
+async fn keep_if_patch_changes_object(
+    mut diff: ResourceDiff,
+    clients: &KubernetesClients,
+) -> Result<Option<ResourceDiff>> {
+    let DiffAction::Patch { patch, .. } = &diff.action else {
+        return Ok(Some(diff));
+    };
+    let api = get_kubernetes_api(&diff.key, clients)?;
+    let params = PatchParams::apply(MANAGER).dry_run();
+    let trial = Patch::<()>::Json(patch.clone());
+    let (live, patched) = tokio::join!(
+        api.get_opt(&diff.key.name),
+        api.patch(&diff.key.name, &params, &trial),
+    );
+    let Some(live) = live.with_context(|| format!("while reading {}", diff.key))? else {
+        // The object is gone from the cluster. Keep the diff, and the push reports it.
+        return Ok(Some(diff));
+    };
+    let patched = patched.with_context(|| format!("while trying the patch to {}", diff.key))?;
+
+    let before = without_write_metadata(live)?;
+    let after = without_write_metadata(patched)?;
+    if before == after {
+        return Ok(None);
+    }
+    diff.before = serde_yaml::to_string(&before)?;
+    diff.after = serde_yaml::to_string(&after)?;
+    Ok(Some(diff))
 }
 
 fn generate_single_diff(
@@ -170,4 +226,14 @@ fn requires_recreate(types: &TypeMeta, patch: &json_patch::Patch) -> bool {
         _ => {},
     };
     false
+}
+
+/// Removes what every write changes even when the object stays the same.
+fn without_write_metadata(object: DynamicObject) -> Result<JsonValue> {
+    let mut value = serde_json::to_value(object)?;
+    if let Some(metadata) = value.get_mut("metadata").and_then(JsonValue::as_object_mut) {
+        metadata.remove("managedFields");
+        metadata.remove("resourceVersion");
+    }
+    Ok(value)
 }

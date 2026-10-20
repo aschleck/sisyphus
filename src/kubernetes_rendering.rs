@@ -14,16 +14,16 @@ use docker_registry::render as containerRender;
 use futures::future::try_join_all;
 use k8s_openapi::{
     api::{
-        apps::v1::{Deployment, DeploymentSpec, DeploymentStrategy, RollingUpdateDeployment},
+        apps::v1::{Deployment, DeploymentSpec},
         batch::v1::{CronJob, CronJobSpec, JobSpec, JobTemplateSpec},
         core::v1::{
             ClusterTrustBundleProjection, ConfigMapKeySelector, ConfigMapProjection, Container,
             ContainerPort, DownwardAPIProjection, DownwardAPIVolumeFile, EnvVar, EnvVarSource,
-            HTTPGetAction, KeyToPath, ObjectFieldSelector, PodCertificateProjection,
-            PodSecurityContext, PodSpec, PodTemplateSpec, Probe as KubeProbe,
-            ProjectedVolumeSource, ResourceFieldSelector, ResourceRequirements, SecretKeySelector,
-            SecretProjection, Service, ServiceAccountTokenProjection, ServicePort, ServiceSpec,
-            Volume, VolumeMount, VolumeProjection,
+            HTTPGetAction, KeyToPath, ObjectFieldSelector, PodCertificateProjection, PodSpec,
+            PodTemplateSpec, Probe as KubeProbe, ProjectedVolumeSource, ResourceFieldSelector,
+            ResourceRequirements, SecretKeySelector, SecretProjection, Service,
+            ServiceAccountTokenProjection, ServicePort, ServiceSpec, Volume, VolumeMount,
+            VolumeProjection,
         },
     },
     apimachinery::pkg::{api::resource::Quantity, util::intstr::IntOrString},
@@ -92,13 +92,9 @@ pub(crate) async fn render_sisyphus_resource(
                 &v.config.variables,
             )?;
 
+            let mut pod_spec = build_pod_spec(container, &v.config.service_account, volumes);
             let restart_policy = v.config.restart_policy.as_deref().unwrap_or("OnFailure");
-            let pod_spec = build_pod_spec(
-                container,
-                restart_policy,
-                &v.config.service_account,
-                volumes,
-            );
+            pod_spec.restart_policy = Some(restart_policy.to_string());
 
             let namespace = maybe_namespace
                 .as_ref()
@@ -146,7 +142,6 @@ pub(crate) async fn render_sisyphus_resource(
 
             independent_spec.template.spec = Some(build_pod_spec(
                 container,
-                "Always",
                 &v.config.service_account,
                 volumes,
             ));
@@ -272,15 +267,6 @@ fn build_base_deployment_spec(
 ) -> DeploymentSpec {
     let mut independent_spec = DeploymentSpec::default();
     independent_spec.selector.match_labels = Some(selector);
-    independent_spec.progress_deadline_seconds = Some(600);
-    independent_spec.revision_history_limit = Some(10);
-    independent_spec.strategy = Some(DeploymentStrategy {
-        type_: Some("RollingUpdate".to_string()),
-        rolling_update: Some(RollingUpdateDeployment {
-            max_surge: Some(IntOrString::String("25%".to_string())),
-            max_unavailable: Some(IntOrString::String("25%".to_string())),
-        }),
-    });
     let mut template_metadata = ObjectMeta::default();
     template_metadata.labels = Some(labels);
     if !annotations.is_empty() {
@@ -479,21 +465,16 @@ fn build_container_config(
         container.startup_probe = Some(build_probe(probe, &port_numbers)?);
     }
 
-    // Set some defaults
-    container.image_pull_policy = Some("IfNotPresent".to_string());
-    container.termination_message_path = Some("/dev/termination-log".to_string());
-    container.termination_message_policy = Some("File".to_string());
-
     Ok((container, ports, volumes))
 }
 
 fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<KubeProbe> {
     let mut kube_probe = KubeProbe {
         initial_delay_seconds: probe.initial_delay_seconds,
-        period_seconds: Some(probe.period_seconds.unwrap_or(10)),
-        timeout_seconds: Some(probe.timeout_seconds.unwrap_or(1)),
-        success_threshold: Some(probe.success_threshold.unwrap_or(1)),
-        failure_threshold: Some(probe.failure_threshold.unwrap_or(3)),
+        period_seconds: probe.period_seconds,
+        timeout_seconds: probe.timeout_seconds,
+        success_threshold: probe.success_threshold,
+        failure_threshold: probe.failure_threshold,
         ..Default::default()
     };
     match &probe.action {
@@ -507,8 +488,6 @@ fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<Ku
             kube_probe.http_get = Some(HTTPGetAction {
                 path: Some(path.clone()),
                 port: IntOrString::String(port.clone()),
-                // Set some defaults
-                scheme: Some("HTTP".to_string()),
                 ..Default::default()
             });
         }
@@ -518,7 +497,6 @@ fn build_probe(probe: &Probe, port_numbers: &BTreeMap<String, u16>) -> Result<Ku
 
 fn build_pod_spec(
     container: Container,
-    restart_policy: &str,
     service_account: &Option<String>,
     volumes: Vec<Volume>,
 ) -> PodSpec {
@@ -529,13 +507,6 @@ fn build_pod_spec(
     }
     // An app that names no service account gets the default one of its namespace.
     pod_spec.service_account_name = service_account.clone();
-    // Set some defaults
-    pod_spec.dns_policy = Some("ClusterFirst".to_string());
-    pod_spec.restart_policy = Some(restart_policy.to_string());
-    // TODO(april): this won't work when there's another scheduler
-    pod_spec.scheduler_name = Some("default-scheduler".to_string());
-    pod_spec.security_context = Some(PodSecurityContext::default());
-    pod_spec.termination_grace_period_seconds = Some(30);
     pod_spec
 }
 
@@ -840,11 +811,8 @@ fn render_file_variable(
             let mut volume = Volume::default();
             volume.name = variable.name.clone();
             volume.projected = Some(ProjectedVolumeSource {
-                // TODO(april): the following 420 is the default from Kubernetes but it's
-                // confusing. Why does the group have write? We set read_only on the mount, what
-                // does this even mean?
-                default_mode: Some(420),
                 sources: Some(Vec::new()),
+                ..Default::default()
             });
             volumes.push(volume);
             variable.name.clone()
