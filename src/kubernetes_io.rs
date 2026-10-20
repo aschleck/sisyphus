@@ -259,8 +259,11 @@ pub(crate) async fn get_kubernetes_clients(
     let mut types = HashMap::new();
     for future in futures {
         for group in future.await??.groups() {
-            for (ar, caps) in group.recommended_resources() {
-                types.insert((ar.api_version.clone(), ar.kind.clone()), (ar, caps));
+            // A group can serve kinds that its preferred version lacks, so take every version
+            for version in group.versions() {
+                for (ar, caps) in group.versioned_resources(version) {
+                    types.insert((ar.api_version.clone(), ar.kind.clone()), (ar, caps));
+                }
             }
         }
     }
